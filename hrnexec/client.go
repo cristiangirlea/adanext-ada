@@ -25,6 +25,7 @@ const (
 
 type Options struct {
 	HRNPath    string
+	HRNHome    string
 	Grace      time.Duration
 	WithoutEnv []string
 }
@@ -127,15 +128,7 @@ func Run(ctx context.Context, opts Options, task Task, onEvent func(Event)) (Res
 	if task.Mode == "" {
 		return Result{}, fmt.Errorf("hrn task mode is required")
 	}
-	// Go restores SYSTEMROOT in Windows child environments.
-	if runtime.GOOS == "windows" && slices.ContainsFunc(opts.WithoutEnv, func(name string) bool {
-		return strings.EqualFold(name, "SYSTEMROOT")
-	}) {
-		return Result{}, fmt.Errorf("cannot start hrn with SYSTEMROOT excluded from its Windows environment")
-	}
-	if opts.HRNPath == "" {
-		opts.HRNPath = "hrn"
-	}
+
 	if opts.Grace <= 0 {
 		opts.Grace = 10 * time.Second
 	}
@@ -145,17 +138,10 @@ func Run(ctx context.Context, opts Options, task Task, onEvent func(Event)) (Res
 	}
 	attemptID := "ada-" + hex.EncodeToString(random[:])
 
-	cmd := exec.Command(opts.HRNPath, "exec", "--protocol", "v1")
-	setProcessAttributes(cmd)
-	if len(opts.WithoutEnv) > 0 {
-		cmd.Env = slices.DeleteFunc(cmd.Environ(), func(entry string) bool {
-			name, _, _ := strings.Cut(entry, "=")
-			return name != "" && slices.ContainsFunc(opts.WithoutEnv, func(excluded string) bool {
-				return name == excluded || runtime.GOOS == "windows" && strings.EqualFold(name, excluded)
-			})
-		})
+	cmd, err := hrnCommand(opts, "exec", "--protocol", "v1")
+	if err != nil {
+		return Result{}, err
 	}
-	cmd.WaitDelay = time.Second
 	var tail stderrTail
 	cmd.Stderr = &tail
 	stdin, err := cmd.StdinPipe()
@@ -241,6 +227,33 @@ func Run(ctx context.Context, opts Options, task Task, onEvent func(Event)) (Res
 		return Result{}, withStderr(fmt.Errorf("wait for hrn: %w", waitErr), tail)
 	}
 	return result, nil
+}
+
+func hrnCommand(opts Options, args ...string) (*exec.Cmd, error) {
+	// Go restores SYSTEMROOT in Windows child environments.
+	if runtime.GOOS == "windows" && slices.ContainsFunc(opts.WithoutEnv, func(name string) bool {
+		return strings.EqualFold(name, "SYSTEMROOT")
+	}) {
+		return nil, fmt.Errorf("cannot start hrn with SYSTEMROOT excluded from its Windows environment")
+	}
+	if opts.HRNPath == "" {
+		opts.HRNPath = "hrn"
+	}
+	cmd := exec.Command(opts.HRNPath, args...)
+	setProcessAttributes(cmd)
+	if len(opts.WithoutEnv) > 0 {
+		cmd.Env = slices.DeleteFunc(cmd.Environ(), func(entry string) bool {
+			name, _, _ := strings.Cut(entry, "=")
+			return name != "" && slices.ContainsFunc(opts.WithoutEnv, func(excluded string) bool {
+				return name == excluded || runtime.GOOS == "windows" && strings.EqualFold(name, excluded)
+			})
+		})
+	}
+	if opts.HRNHome != "" {
+		cmd.Env = append(cmd.Environ(), "HRN_HOME="+opts.HRNHome)
+	}
+	cmd.WaitDelay = time.Second
+	return cmd, nil
 }
 
 func withStderr(err error, tail stderrTail) error {

@@ -34,6 +34,7 @@ type Loop struct {
 	provider.Provider
 	Tools     *tool.Registry
 	System    string
+	Context   func(context.Context) string
 	Model     string
 	MaxTokens int
 	Budget
@@ -64,6 +65,14 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 		}
 		req := provider.Request{
 			Model: l.Model, System: l.System, Messages: history, Tools: specs, MaxTokens: maxTokens,
+		}
+		if l.Context != nil {
+			if extra := l.Context(turnCtx); extra != "" {
+				if req.System != "" {
+					req.System += "\n\n"
+				}
+				req.System += extra
+			}
 		}
 		res, err := l.Complete(turnCtx, req)
 		if turnCtx.Err() != nil {
@@ -112,18 +121,27 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 			return stoppedByContext(ctx, history, budget.Timeout)
 		}
 		if stop != "" {
-			return stop, history, nil
+			return budgetStop(stop, history)
 		}
 		if len(results) == 0 {
 			return strings.Join(texts, "\n"), history, nil
 		}
 	}
-	return fmt.Sprintf("Stopped: the iteration budget (%d) was reached.", budget.MaxIterations), history, nil
+	return budgetStop(fmt.Sprintf("Stopped: the iteration budget (%d) was reached.", budget.MaxIterations), history)
 }
 
 func stoppedByContext(ctx context.Context, history []provider.Message, timeout time.Duration) (string, []provider.Message, error) {
 	if err := ctx.Err(); err != nil {
 		return "", history, err
 	}
-	return fmt.Sprintf("Stopped: the timeout budget (%s) was reached.", timeout), history, nil
+	return budgetStop(fmt.Sprintf("Stopped: the timeout budget (%s) was reached.", timeout), history)
+}
+
+func budgetStop(stop string, history []provider.Message) (string, []provider.Message, error) {
+	last := history[len(history)-1]
+	// Saved history must alternate, whether the turn stopped after tool results or before any answer.
+	if last.Role == "user" {
+		history = append(history, provider.Message{Role: "assistant", Content: []provider.Block{{Type: "text", Text: stop}}})
+	}
+	return stop, history, nil
 }

@@ -9,7 +9,8 @@ and configured tool specs to the chat provider. If the model asks for tools,
 Ada records the assistant's reply and sends the results together in one user
 message. A failed tool call becomes an error result the model can respond to.
 The turn returns the assistant's text once there are no further tool calls.
-Chat history stays in memory for the lifetime of the command. Ctrl-C during
+Chat history is stored locally. See [Ada's memory](memory.md) for sessions,
+profile facts, local search and project knowledge. Ctrl-C during
 a turn cancels it. Failed turns report to stderr and leave the previous
 conversation intact. EOF or Ctrl-C between turns ends the chat.
 
@@ -85,7 +86,7 @@ Timeout settings use Go duration strings such as `30m` and `1h`.
 
 ## Later slices
 
-Memory (#3) adds persistence. Channels (#4) add chat integrations. Approvals
+Channels (#4) add chat integrations. Approvals
 (#5) add approval flows for effects. Scheduling (#6) adds scheduled work.
 Learning (#7) adds learning proposals. Isolation (#8) adds stronger execution
 boundaries.

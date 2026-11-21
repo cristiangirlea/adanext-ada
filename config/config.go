@@ -12,22 +12,37 @@ import (
 
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
 	"github.com/cristiangirlea/adanext-ada/loop"
+	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
 
+type KnowledgeSettings struct {
+	TenantID  string `json:"tenant_id"`
+	ProjectID string `json:"project_id"`
+	Backend   string `json:"backend"`
+	Model     string `json:"model"`
+	Revision  string `json:"revision"`
+}
+
 type Settings struct {
-	Providers      []provider.Config `json:"providers"`
-	ChatProvider   string            `json:"chat_provider"`
-	AllowMetered   bool              `json:"allow_metered"`
-	Budget         loop.Budget       `json:"-"`
-	ReadRoots      []string          `json:"read_roots"`
-	WorkspaceRoots []string          `json:"workspace_roots"`
-	HRN            HRNSettings       `json:"-"`
-	MCPServers     []tool.MCPConfig  `json:"mcp_servers"`
+	DataDir         string             `json:"data_dir"`
+	Owner           string             `json:"owner"`
+	SessionIdle     time.Duration      `json:"-"`
+	HistoryMessages int                `json:"history_messages"`
+	Knowledge       *KnowledgeSettings `json:"knowledge"`
+	Providers       []provider.Config  `json:"providers"`
+	ChatProvider    string             `json:"chat_provider"`
+	AllowMetered    bool               `json:"allow_metered"`
+	Budget          loop.Budget        `json:"-"`
+	ReadRoots       []string           `json:"read_roots"`
+	WorkspaceRoots  []string           `json:"workspace_roots"`
+	HRN             HRNSettings        `json:"-"`
+	MCPServers      []tool.MCPConfig   `json:"mcp_servers"`
 }
 
 type HRNSettings struct {
+	Home    string
 	Path    string
 	Mode    string
 	Timeout time.Duration
@@ -35,6 +50,7 @@ type HRNSettings struct {
 }
 
 type fileSettings struct {
+	SessionIdle string `json:"session_idle"`
 	Settings
 	Budget struct {
 		MaxIterations int    `json:"max_iterations"`
@@ -42,6 +58,7 @@ type fileSettings struct {
 		Timeout       string `json:"timeout"`
 	} `json:"budget"`
 	HRN struct {
+		Home    string `json:"home"`
 		Path    string `json:"path"`
 		Mode    string `json:"mode"`
 		Timeout string `json:"timeout"`
@@ -80,12 +97,18 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	s.SessionIdle, err = parseTimeout("session_idle", data.SessionIdle)
+	if err != nil {
+		return Settings{}, err
+	}
 	s.Budget = loop.Budget{MaxIterations: data.Budget.MaxIterations, MaxTokens: data.Budget.MaxTokens, Timeout: turnTimeout}
-	s.HRN = HRNSettings{Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
+	s.HRN = HRNSettings{Home: data.HRN.Home, Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
 	if err := s.validate(); err != nil {
 		return Settings{}, err
 	}
-	s.setDefaults()
+	if err := s.setDefaults(); err != nil {
+		return Settings{}, err
+	}
 	return s, nil
 }
 
@@ -104,6 +127,19 @@ func parseTimeout(name, raw string) (time.Duration, error) {
 }
 
 func (s Settings) validate() error {
+	if s.Owner != "" && !memory.ValidIdentity(s.Owner) {
+		return fmt.Errorf("owner must be a valid user id")
+	}
+	if s.HistoryMessages < 0 || s.SessionIdle < 0 {
+		return fmt.Errorf("history_messages and session_idle cannot be negative")
+	}
+	if k := s.Knowledge; k != nil {
+		for _, v := range []string{k.TenantID, k.ProjectID, k.Backend, k.Model, k.Revision} {
+			if strings.TrimSpace(v) == "" {
+				return fmt.Errorf("knowledge requires tenant_id, project_id, backend, model and revision")
+			}
+		}
+	}
 	if s.ChatProvider == "" {
 		return fmt.Errorf("chat_provider is required")
 	}
@@ -131,7 +167,23 @@ func (s Settings) validate() error {
 	return nil
 }
 
-func (s *Settings) setDefaults() {
+func (s *Settings) setDefaults() error {
+	if s.DataDir == "" {
+		dir, err := os.UserConfigDir()
+		if err != nil {
+			return fmt.Errorf("locate Ada data directory: %w", err)
+		}
+		s.DataDir = filepath.Join(dir, "adanext-ada", "data")
+	}
+	if s.Owner == "" {
+		s.Owner = "owner"
+	}
+	if s.HistoryMessages == 0 {
+		s.HistoryMessages = memory.DefaultHistory
+	}
+	if s.SessionIdle == 0 {
+		s.SessionIdle = memory.DefaultIdle
+	}
 	s.Budget = s.Budget.WithDefaults()
 	if s.HRN.Path == "" {
 		s.HRN.Path = "hrn"
@@ -142,17 +194,32 @@ func (s *Settings) setDefaults() {
 	if s.HRN.Timeout <= 0 {
 		s.HRN.Timeout = tool.DefaultDelegateTimeout
 	}
+	return nil
 }
 
-func Build(s Settings, getenv func(string) string) (*loop.Loop, error) {
+func (s Settings) RunsDir(getenv func(string) string) string {
+	if s.HRN.Home != "" {
+		return filepath.Join(s.HRN.Home, "runs")
+	}
+	return memory.HRNRunsDir(getenv)
+}
+
+type App struct {
+	*loop.Loop
+	Store *memory.Store
+}
+
+func Build(s Settings, getenv func(string) string) (*App, error) {
 	return build(s, getenv, 30*time.Second)
 }
 
-func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Duration) (*loop.Loop, error) {
+func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Duration) (*App, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
 	}
-	s.setDefaults()
+	if err := s.setDefaults(); err != nil {
+		return nil, err
+	}
 	var selected *provider.Config
 	for _, cfg := range s.Providers {
 		if cfg.Name != s.ChatProvider {
@@ -178,15 +245,22 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 			return nil, err
 		}
 	}
-	if len(s.WorkspaceRoots) > 0 {
-		var withoutEnv []string
-		for _, cfg := range s.Providers {
-			if cfg.APIKeyEnv != "" {
-				withoutEnv = append(withoutEnv, cfg.APIKeyEnv)
-			}
+	var withoutEnv []string
+	for _, cfg := range s.Providers {
+		if cfg.APIKeyEnv != "" {
+			withoutEnv = append(withoutEnv, cfg.APIKeyEnv)
 		}
+	}
+	opts := hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: withoutEnv}
+	if k := s.Knowledge; k != nil {
+		req := hrnexec.KnowledgeRequest{TenantID: k.TenantID, ProjectID: k.ProjectID, Backend: k.Backend, Model: k.Model, Revision: k.Revision}
+		if err := registry.Add(tool.SearchKnowledge{Options: opts, Request: req}); err != nil {
+			return nil, err
+		}
+	}
+	if len(s.WorkspaceRoots) > 0 {
 		if err := registry.Add(tool.Delegate{
-			Roots: s.WorkspaceRoots, Options: hrnexec.Options{HRNPath: s.HRN.Path, WithoutEnv: withoutEnv}, Mode: s.HRN.Mode,
+			Roots: s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
 			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
 		}); err != nil {
 			return nil, err
@@ -201,5 +275,22 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 			return nil, err
 		}
 	}
-	return &loop.Loop{Provider: model, Tools: registry, Model: selected.Model, Budget: s.Budget}, nil
+	store, err := memory.NewStore(s.DataDir)
+	if err != nil {
+		registry.Close()
+		return nil, err
+	}
+	if err := registry.Add(tool.SearchMemory{Store: store, HRNRuns: s.RunsDir(getenv)}); err != nil {
+		store.Close()
+		registry.Close()
+		return nil, err
+	}
+	profile := func(ctx context.Context) string {
+		user, ok := memory.UserFrom(ctx)
+		if !ok {
+			return ""
+		}
+		return store.Render(user)
+	}
+	return &App{Loop: &loop.Loop{Provider: model, Tools: registry, Model: selected.Model, Budget: s.Budget, Context: profile}, Store: store}, nil
 }
