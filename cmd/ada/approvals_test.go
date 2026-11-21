@@ -97,7 +97,7 @@ func TestChatApprovalAndOwnerHistory(t *testing.T) {
 	}
 	foreign := records[0]
 	foreign.Request.User = "Someone else"
-	foreign.Request.Summary = "private"
+	foreign.Request.Summary = "foreign-summary-marker"
 	foreign.Decision.At = time.Now().Add(time.Second)
 	if err := approval.Log(dir).Record(foreign.Request, foreign.Decision); err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestChatApprovalAndOwnerHistory(t *testing.T) {
 	if err := run(t.Context(), []string{"approvals", "-config", settings, "-n", "1"}, strings.NewReader(""), &output, &diag); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), records[0].Request.ID) || !strings.Contains(output.String(), "edit the notes") || !strings.Contains(output.String(), "approved") || strings.Contains(output.String(), "private") {
+	if !strings.Contains(output.String(), records[0].Request.ID) || !strings.Contains(output.String(), "edit the notes") || !strings.Contains(output.String(), "approved") || strings.Contains(output.String(), "foreign-summary-marker") {
 		t.Fatal(output.String())
 	}
 }

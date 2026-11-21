@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -76,7 +77,12 @@ func TestDelegationApprovals(t *testing.T) {
 						t.Fatalf("summary = %s", r.Summary)
 					}
 				}
-				if !strings.Contains(strings.ReplaceAll(r.Summary, `\\`, `\`), root) {
+				// The summary holds the resolved path; temp dirs may be 8.3 short names or symlinks.
+				resolved, err := filepath.EvalSymlinks(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(strings.ReplaceAll(r.Summary, `\\`, `\`), resolved) {
 					t.Fatalf("missing directory in %q", r.Summary)
 				}
 			}
