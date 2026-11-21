@@ -209,11 +209,15 @@ func (s *Store) Resolve(channel, sender string) (string, bool) {
 
 var sessionID = regexp.MustCompile(`^[0-9A-Za-z-]+$`)
 
+func ValidSessionID(id string) bool {
+	return sessionID.MatchString(id) && filepath.IsLocal(id)
+}
+
 func sessionPath(id, file string) string { return filepath.Join("sessions", id, file) }
 
 func (s *Store) get(id string) (Session, error) {
 	var session Session
-	if !sessionID.MatchString(id) || !filepath.IsLocal(id) {
+	if !ValidSessionID(id) {
 		return session, fmt.Errorf("invalid session id")
 	}
 	data, err := s.root.ReadFile(sessionPath(id, "meta.json"))

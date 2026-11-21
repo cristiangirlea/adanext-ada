@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
@@ -26,6 +27,7 @@ type KnowledgeSettings struct {
 }
 
 type Settings struct {
+	ApprovalTimeout time.Duration      `json:"-"`
 	DataDir         string             `json:"data_dir"`
 	Owner           string             `json:"owner"`
 	SessionIdle     time.Duration      `json:"-"`
@@ -50,6 +52,9 @@ type HRNSettings struct {
 }
 
 type fileSettings struct {
+	Approvals struct {
+		Timeout string `json:"timeout"`
+	} `json:"approvals"`
 	SessionIdle string `json:"session_idle"`
 	Settings
 	Budget struct {
@@ -97,6 +102,10 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	s.ApprovalTimeout, err = parseTimeout("approvals.timeout", data.Approvals.Timeout)
+	if err != nil {
+		return Settings{}, err
+	}
 	s.SessionIdle, err = parseTimeout("session_idle", data.SessionIdle)
 	if err != nil {
 		return Settings{}, err
@@ -143,8 +152,11 @@ func (s Settings) validate() error {
 	if s.ChatProvider == "" {
 		return fmt.Errorf("chat_provider is required")
 	}
-	if s.HRN.Mode != "" && s.HRN.Mode != "readonly" {
-		return fmt.Errorf("hrn.mode must be readonly because writes wait for the approvals slice")
+	if s.HRN.Mode != "" && s.HRN.Mode != "readonly" && s.HRN.Mode != "auto" {
+		return fmt.Errorf("hrn.mode must be readonly or auto")
+	}
+	if s.ApprovalTimeout < 0 {
+		return fmt.Errorf("approvals.timeout cannot be negative")
 	}
 	if len(s.WorkspaceRoots) > 0 && strings.TrimSpace(s.HRN.Backend) == "" {
 		return fmt.Errorf("hrn.backend is required when workspace_roots is set")
@@ -168,6 +180,9 @@ func (s Settings) validate() error {
 }
 
 func (s *Settings) setDefaults() error {
+	if s.ApprovalTimeout == 0 {
+		s.ApprovalTimeout = approval.DefaultTimeout
+	}
 	if s.DataDir == "" {
 		dir, err := os.UserConfigDir()
 		if err != nil {
@@ -236,7 +251,7 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 		return nil, err
 	}
 
-	registry := new(tool.Registry)
+	registry := &tool.Registry{Recorder: approval.Log(s.DataDir), ApprovalTimeout: s.ApprovalTimeout}
 	if err := registry.Add(tool.WebFetch{}); err != nil {
 		return nil, err
 	}

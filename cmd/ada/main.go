@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,9 +13,11 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
+	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/config"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/tool"
@@ -23,7 +26,7 @@ import (
 func terminalField(text string) string {
 	var clean strings.Builder
 	for _, r := range text {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 			quoted := strconv.QuoteRune(r)
 			clean.WriteString(quoted[1 : len(quoted)-1])
 		} else {
@@ -35,6 +38,35 @@ func terminalField(text string) string {
 
 func memoryCommand(command string, args []string, settings config.Settings, store *memory.Store, n int, out io.Writer) error {
 	switch command {
+	case "approvals":
+		if len(args) != 0 || n < 1 {
+			return fmt.Errorf("usage: ada approvals [-n N], N must be positive")
+		}
+		sessions, err := store.List(settings.Owner, 0)
+		if err != nil {
+			return err
+		}
+		ids := make([]string, 0, len(sessions))
+		for _, s := range sessions {
+			ids = append(ids, s.ID)
+		}
+		records, err := approval.Log(settings.DataDir).Latest(settings.Owner, ids, n)
+		if err != nil {
+			return err
+		}
+		for _, r := range records {
+			session := r.Request.Session
+			if session == "" {
+				session = "none"
+			}
+			if _, err := fmt.Fprintf(out, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				r.Decision.At.Format(time.RFC3339Nano), terminalField(r.Request.ID), session,
+				terminalField(r.Request.Tool), terminalField(r.Request.Effect), terminalField(r.Decision.Reason),
+				terminalField(r.Decision.By), terminalField(r.Request.Summary)); err != nil {
+				return fmt.Errorf("print approval: %w", err)
+			}
+		}
+		return nil
 	case "profile":
 		switch {
 		case len(args) == 1 && args[0] == "list":
@@ -116,7 +148,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		_, err := fmt.Fprintln(out, "ada", version)
 		return err
 	}
-	const usage = "usage: ada chat | profile | sessions | search | version"
+	const usage = "usage: ada chat | profile | sessions | approvals | search | version"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -132,6 +164,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		flags.StringVar(&resume, "resume", "", "resume this session")
 	case "sessions":
 		flags.IntVar(&n, "n", 20, "maximum number of sessions")
+	case "approvals":
+		flags.IntVar(&n, "n", 20, "maximum number of approvals")
 	case "profile", "search":
 	default:
 		return errors.New(usage)
@@ -201,11 +235,18 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return fmt.Errorf("print session id: %w", err)
 	}
 
-	input := bufio.NewScanner(in)
-	input.Buffer(make([]byte, 64<<10), 4<<20)
-	for input.Scan() {
+	surface := newCLISurface(in, diagnostics)
+	ctx = approval.WithApprover(approval.WithSession(ctx, session.ID), surface)
+	for {
+		line, err := surface.read(ctx, nil)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read chat input: %w", err)
+		}
 		turn, stop := signal.NotifyContext(ctx, os.Interrupt)
-		answer, next, err := conversation.Turn(turn, history, input.Text())
+		answer, next, err := conversation.Turn(turn, history, line.text)
 		interrupted := turn.Err() == context.Canceled
 		stop()
 		switch {
@@ -213,9 +254,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 			return ctx.Err()
 		case err != nil:
 			if interrupted && errors.Is(err, context.Canceled) {
-				fmt.Fprintln(diagnostics, "Turn canceled.")
+				surface.printDiagnostic("Turn canceled.")
 			} else {
-				fmt.Fprintln(diagnostics, err)
+				surface.printDiagnostic(err.Error())
 			}
 			continue
 		default:
@@ -228,8 +269,140 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 			return fmt.Errorf("print answer: %w", err)
 		}
 	}
-	if err := input.Err(); err != nil {
-		return fmt.Errorf("read chat input: %w", err)
+}
+
+type cliLine struct {
+	text         string
+	confirmation bool
+	err          error
+}
+
+type cliSurface struct {
+	reader      *bufio.Reader
+	readErr     error
+	diagnostics io.Writer
+	outputMu    sync.Mutex
+	readerLock  chan struct{}
+	pending     chan cliLine
+}
+
+func newCLISurface(in io.Reader, diagnostics io.Writer) *cliSurface {
+	// Keep the chat line limit while allowing the approver to inspect buffered input.
+	return &cliSurface{reader: bufio.NewReaderSize(in, 4<<20), diagnostics: diagnostics, readerLock: make(chan struct{}, 1)}
+}
+
+var errTypedAhead = errors.New("typed ahead")
+
+func (s *cliSurface) printDiagnostic(message string) error {
+	// An expiring approval can report its decision while the chat turn resumes.
+	s.outputMu.Lock()
+	defer s.outputMu.Unlock()
+	_, err := fmt.Fprintln(s.diagnostics, message)
+	return err
+}
+
+func (s *cliSurface) read(ctx context.Context, prompt func() (string, error)) (cliLine, error) {
+	select {
+	case s.readerLock <- struct{}{}:
+	case <-ctx.Done():
+		return cliLine{}, ctx.Err()
 	}
-	return nil
+	defer func() { <-s.readerLock }()
+	if err := ctx.Err(); err != nil {
+		return cliLine{}, err
+	}
+	// A pending read owns the reader until its line is collected.
+	if prompt != nil && (s.pending != nil || s.reader.Buffered() > 0) {
+		return cliLine{}, errTypedAhead
+	}
+	if s.pending != nil {
+		line, err := s.waitLine(ctx)
+		if err != nil || !line.confirmation {
+			return line, err
+		}
+	}
+	var code string
+	if prompt != nil {
+		var err error
+		code, err = prompt()
+		if err != nil {
+			return cliLine{}, err
+		}
+	}
+	reply := make(chan cliLine, 1)
+	s.pending = reply
+	go func() {
+		reply <- s.readLine(code)
+	}()
+	return s.waitLine(ctx)
+}
+
+func (s *cliSurface) readLine(code string) cliLine {
+	if s.readErr != nil {
+		return cliLine{err: s.readErr}
+	}
+	raw, err := s.reader.ReadSlice('\n')
+	s.readErr = err
+	if err != nil && !(errors.Is(err, io.EOF) && len(raw) > 0) {
+		return cliLine{err: err}
+	}
+	text := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	if code != "" && strings.EqualFold(strings.TrimSpace(text), code) {
+		// A late or unterminated code must never become chat text.
+		return cliLine{confirmation: err == nil, err: err}
+	}
+	return cliLine{text: text}
+}
+
+func (s *cliSurface) waitLine(ctx context.Context) (cliLine, error) {
+	select {
+	case line := <-s.pending:
+		s.pending = nil
+		return line, line.err
+	case <-ctx.Done():
+		return cliLine{}, ctx.Err()
+	}
+}
+
+func (s *cliSurface) Ask(ctx context.Context, r approval.Request) (approval.Decision, error) {
+	ctx, cancel := context.WithDeadline(ctx, r.Expires)
+	defer cancel()
+	line, err := s.read(ctx, func() (string, error) {
+		const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+		var code [4]byte
+		rand.Read(code[:])
+		for i, b := range code {
+			code[i] = alphabet[int(b)%len(alphabet)]
+		}
+		left := time.Until(r.Expires)
+		if left >= time.Second {
+			left = left.Round(time.Second)
+		}
+		duration := min(left, r.Expires.Sub(r.Created)).String()
+		if strings.HasSuffix(duration, "m0s") {
+			duration = strings.TrimSuffix(duration, "0s")
+		}
+		prompt := fmt.Sprintf("Ada asks to %s: %s\nType %s to approve, anything else to deny (expires in %s):", terminalField(r.Effect), terminalField(r.Summary), code, duration)
+		return string(code[:]), s.printDiagnostic(prompt)
+	})
+	d := approval.Decision{By: "cli", At: time.Now().UTC(), Reason: "denied"}
+	switch {
+	case !d.At.Before(r.Expires) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+		d.Reason = "expired"
+		if err := s.printDiagnostic("Approval expired; nothing was run."); err != nil {
+			return d, fmt.Errorf("print approval expiry: %w", err)
+		}
+	case errors.Is(err, errTypedAhead):
+		d.Reason = "typed ahead"
+		if err := s.printDiagnostic("Approval denied: input was typed ahead."); err != nil {
+			return d, fmt.Errorf("print approval denial: %w", err)
+		}
+	case errors.Is(err, io.EOF):
+	case err != nil:
+		return d, fmt.Errorf("read CLI approval: %w", err)
+	case ctx.Err() == nil && line.confirmation:
+		d.Approved = true
+		d.Reason = "approved"
+	}
+	return d, nil
 }

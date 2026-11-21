@@ -83,6 +83,12 @@ func TestMain(m *testing.M) {
 }
 
 func runDelegateHelper() {
+	if marker := os.Getenv("ADA_TEST_DELEGATE_STARTED"); marker != "" {
+		if err := os.WriteFile(marker, nil, 0600); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
 	fmt.Println(`{"v":1,"seq":1,"type":"hello","protocol":"v1"}`)
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
@@ -92,7 +98,11 @@ func runDelegateHelper() {
 		AttemptID string `json:"attempt_id"`
 		Task      map[string]string
 	}
-	if json.Unmarshal(scanner.Bytes(), &start) != nil || start.Task["mode"] != "readonly" ||
+	mode := "readonly"
+	if os.Getenv("ADA_TEST_DELEGATE") == "auto" {
+		mode = "auto"
+	}
+	if json.Unmarshal(scanner.Bytes(), &start) != nil || start.Task["mode"] != mode ||
 		start.Task["timeout"] != "30m0s" || start.Task["backend"] != "configured" ||
 		start.Task["purpose"] != "implement" || start.Task["prompt"] != "change the code" || start.Task["dir"] == "" {
 		fmt.Fprintln(os.Stderr, "unexpected delegation task")
@@ -125,7 +135,7 @@ func TestDelegateSchema(t *testing.T) {
 func TestDelegateRefusals(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	for _, tc := range []struct{ name, dir, mode, purpose, want string }{
-		{"auto", root, "auto", "review", "readonly"},
+		{"yolo", root, "yolo", "review", "readonly"},
 		{"unset mode", root, "", "review", "readonly"},
 		{"invalid purpose", root, "readonly", "coding", "purpose"},
 		{"empty purpose", root, "readonly", "", "purpose"},
