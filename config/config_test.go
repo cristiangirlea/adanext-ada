@@ -79,30 +79,46 @@ func TestBuildMCPStartupTimeout(t *testing.T) {
 
 func TestBuildFiltersEveryProviderKeyFromHRN(t *testing.T) {
 	t.Setenv("ADA_TEST_CONFIG_HRN", "1")
+	home := t.TempDir()
+	t.Setenv("ADA_TEST_EXPECT_HOME", home)
+	t.Setenv("HRN_HOME", t.TempDir())
 	t.Setenv("ADA_TEST_CONFIG_SELECTED_KEY", "fixture")
 	t.Setenv("ADA_TEST_CONFIG_UNUSED_KEY", "fixture")
 	root := t.TempDir()
 	l, err := Build(Settings{
+		DataDir:      t.TempDir(),
 		ChatProvider: "local",
 		Providers: []provider.Config{
 			{Name: "local", Kind: "openai", BaseURL: "http://localhost", APIKeyEnv: "ADA_TEST_CONFIG_SELECTED_KEY"},
 			{Name: "unused", APIKeyEnv: "ADA_TEST_CONFIG_UNUSED_KEY"},
 		},
+		Knowledge:      &KnowledgeSettings{TenantID: "t", ProjectID: "p", Backend: "b", Model: "m", Revision: "r"},
 		WorkspaceRoots: []string{root},
-		HRN:            HRNSettings{Path: os.Args[0], Backend: "configured"},
+		HRN:            HRNSettings{Home: home, Path: os.Args[0], Backend: "configured"},
 	}, os.Getenv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = l.Tools.Close() })
+	t.Cleanup(func() { l.Tools.Close(); l.Store.Close() })
 	input, _ := json.Marshal(map[string]string{"prompt": "review", "dir": root})
 	if got, err := l.Tools.Run(t.Context(), "delegate_to_hrn", input); err != nil || !strings.Contains(got, "filtered") {
 		t.Fatalf("delegate = %q, %v", got, err)
+	}
+	if got, err := l.Tools.Run(t.Context(), "search_knowledge", []byte(`{"query":"test"}`)); err != nil || got != "empty" {
+		t.Fatal(got, err)
 	}
 }
 
 func TestMain(m *testing.M) {
 	if os.Getenv("ADA_TEST_CONFIG_HRN") == "1" {
+		if os.Getenv("HRN_HOME") != os.Getenv("ADA_TEST_EXPECT_HOME") {
+			fmt.Fprintln(os.Stderr, "wrong hrn home")
+			os.Exit(2)
+		}
+		if len(os.Args) == 4 && os.Args[1] == "knowledge" && os.Args[2] == "search" {
+			fmt.Println(`{"empty_reason":"empty"}`)
+			os.Exit(0)
+		}
 		_, selected := os.LookupEnv("ADA_TEST_CONFIG_SELECTED_KEY")
 		_, unused := os.LookupEnv("ADA_TEST_CONFIG_UNUSED_KEY")
 		if selected || unused {
@@ -142,16 +158,17 @@ func TestLoadDefaultsAndBuild(t *testing.T) {
 		settings.Budget.MaxIterations != 25 || settings.Budget.MaxTokens != 200000 || settings.Budget.Timeout != time.Hour {
 		t.Fatalf("unexpected settings: %+v", settings)
 	}
+	settings.DataDir = t.TempDir()
 	l, err := Build(settings, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = l.Tools.Close() })
+	t.Cleanup(func() { l.Tools.Close(); l.Store.Close() })
 	if l.Provider.Name() != "local" || l.Model != "model" {
 		t.Fatalf("loop = %+v", l)
 	}
 	specs := l.Tools.Specs()
-	if len(specs) != 1 || specs[0].Name != (tool.WebFetch{}).Spec().Name {
+	if len(specs) != 2 || specs[0].Name != (tool.WebFetch{}).Spec().Name || specs[1].Name != "search_memory" {
 		t.Fatalf("unexpected tools: %+v", specs)
 	}
 }

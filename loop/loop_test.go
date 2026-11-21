@@ -39,9 +39,13 @@ func TestTurnBudgets(t *testing.T) {
 				return provider.Response{Content: []provider.Block{{Type: "tool_use", ID: "call", Name: "unknown"}}, Usage: provider.Usage{InputTokens: 3, OutputTokens: 3}}, nil
 			})
 			l := Loop{Provider: p, Budget: tc.budget}
-			answer, _, err := l.Turn(t.Context(), nil, "question")
+			answer, history, err := l.Turn(t.Context(), nil, "question")
 			if err != nil || !strings.Contains(answer, tc.name+" budget") || calls != tc.calls {
 				t.Fatalf("Turn = %q, %v, calls = %d", answer, err, calls)
+			}
+			last := history[len(history)-1]
+			if last.Role != "assistant" || len(last.Content) != 1 || last.Content[0].Type != "text" || last.Content[0].Text != answer {
+				t.Errorf("last message = %+v, want assistant stop %q", last, answer)
 			}
 		})
 	}
@@ -85,9 +89,12 @@ func TestTurnTimeoutAndCancellation(t *testing.T) {
 		return provider.Response{}, ctx.Err()
 	})
 	l := Loop{Provider: p, Budget: Budget{Timeout: time.Millisecond}}
-	answer, _, err := l.Turn(t.Context(), nil, "question")
+	answer, history, err := l.Turn(t.Context(), nil, "question")
 	if err != nil || !strings.Contains(answer, "timeout budget") {
 		t.Fatalf("timeout = %q, %v", answer, err)
+	}
+	if len(history) != 2 || history[1].Role != "assistant" || history[1].Content[0].Text != answer {
+		t.Fatalf("history after a timeout in the first call = %+v", history)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -130,7 +137,7 @@ func TestTurnTokenBudgetSkipsTools(t *testing.T) {
 		if err != nil || calls != 1 || !strings.Contains(answer, "token budget") {
 			t.Fatalf("usage %+v: Turn = %q, %v, calls = %d", usage, answer, err, calls)
 		}
-		result := next[len(next)-1].Content[0]
+		result := next[len(next)-2].Content[0]
 		if !result.IsError || result.ToolUseID != "new" || result.Text != answer {
 			t.Errorf("tool result = %+v", result)
 		}
@@ -165,5 +172,22 @@ func TestTurnKeepsPartialReportedUsage(t *testing.T) {
 		if answer, _, err := l.Turn(t.Context(), nil, "question"); err != nil || answer != want {
 			t.Errorf("usage %+v: Turn = %q, %v", usage, answer, err)
 		}
+	}
+}
+
+func TestTurnTimeoutAfterToolResults(t *testing.T) {
+	registry := new(tool.Registry)
+	if err := registry.Add(loopTool(func(ctx context.Context) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	})); err != nil {
+		t.Fatal(err)
+	}
+	l := Loop{Tools: registry, Budget: Budget{Timeout: 100 * time.Millisecond}, Provider: loopProvider(func(context.Context, provider.Request) (provider.Response, error) {
+		return provider.Response{Content: []provider.Block{{Type: "tool_use", Name: "fake_tool", ID: "one"}}}, nil
+	})}
+	answer, history, err := l.Turn(t.Context(), nil, "question")
+	if err != nil || len(history) != 4 || history[3].Role != "assistant" || history[3].Content[0].Type != "text" || history[3].Content[0].Text != answer || !strings.Contains(answer, "timeout budget") {
+		t.Fatal(answer, history, err)
 	}
 }

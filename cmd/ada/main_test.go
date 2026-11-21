@@ -19,11 +19,11 @@ func TestRunChatAndVersion(t *testing.T) {
 	}))
 	defer srv.Close()
 	config := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(config, fmt.Appendf(nil, `{"providers":[{"name":"test","kind":"openai","base_url":%q}],"chat_provider":"test"}`, srv.URL), 0600); err != nil {
+	if err := os.WriteFile(config, fmt.Appendf(nil, `{"data_dir":%q,"providers":[{"name":"test","kind":"openai","base_url":%q}],"chat_provider":"test"}`, t.TempDir(), srv.URL), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var out bytes.Buffer
-	if err := run(t.Context(), []string{"chat", "-config", config}, strings.NewReader("first\nsecond\n"), &out, &out); err != nil || out.String() != "answer\nanswer\n" {
+	var out, diagnostics bytes.Buffer
+	if err := run(t.Context(), []string{"chat", "-config", config}, strings.NewReader("first\nsecond\n"), &out, &diagnostics); err != nil || out.String() != "answer\nanswer\n" {
 		t.Fatalf("chat = %q, %v", out.String(), err)
 	}
 	out.Reset()
@@ -62,7 +62,7 @@ func TestRunContinuesAfterTurnError(t *testing.T) {
 	}))
 	defer srv.Close()
 	config := filepath.Join(t.TempDir(), "settings.json")
-	if err := os.WriteFile(config, fmt.Appendf(nil, `{"providers":[{"name":"test","kind":"openai","base_url":%q}],"chat_provider":"test"}`, srv.URL), 0600); err != nil {
+	if err := os.WriteFile(config, fmt.Appendf(nil, `{"data_dir":%q,"providers":[{"name":"test","kind":"openai","base_url":%q}],"chat_provider":"test"}`, t.TempDir(), srv.URL), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var out, diagnostics bytes.Buffer
