@@ -27,8 +27,8 @@ type MCPConfig struct {
 }
 
 func (cfg MCPConfig) Validate() error {
-	if cfg.Effect != Read {
-		return fmt.Errorf("MCP server %q must declare effect read because approvals are not built yet", cfg.Name)
+	if cfg.Effect != Read && cfg.Effect != Write {
+		return fmt.Errorf("MCP server %q must declare effect read or write", cfg.Name)
 	}
 	if cfg.Name == "" || cfg.Command == "" {
 		return fmt.Errorf("MCP server requires a name and command")
@@ -361,7 +361,18 @@ type mcpTool struct {
 }
 
 func (t mcpTool) Spec() provider.ToolSpec { return t.spec }
-func (mcpTool) Effect() Effect            { return Read }
+func (t mcpTool) Effect() Effect          { return t.client.cfg.Effect }
+
+func (t mcpTool) Summary(input json.RawMessage) (string, error) {
+	if err := decodeInput(input, new(json.RawMessage)); err != nil {
+		return "", err
+	}
+	args, err := canonicalArgs(input)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("MCP server=%q tool=%q arguments=%s", t.client.cfg.Name, t.name, args), nil
+}
 
 func (t mcpTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var args json.RawMessage

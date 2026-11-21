@@ -43,15 +43,14 @@ Provider redirects are refused so the request stays on the configured endpoint.
   checking each actual connection, including across redirects. It accepts
   text and JSON and strips markup, scripts and styles from HTML. The limits
   are 20 seconds, 1 MiB and five redirects.
-- `delegate_to_hrn` has the `delegate` effect. Use it for coding work and tasks
+- `delegate_to_hrn` has the `delegate` effect in readonly mode. Use it for coding work and tasks
   that need a stronger coding model. The working directory must be within
   `workspace_roots`. Ada starts `hrn exec --protocol v1`, checks the handshake
   and numbered messages, and returns the run ID, status, backend and result
   text. A status other than `ok` becomes an error result with the status, run
   ID and final text. On turn cancellation, Ada gives hrn up to 10 seconds
   to finish after sending a cancel message, then kills its process tree.
-  The task timeout defaults to 30 minutes. The only supported `hrn.mode` is
-  `readonly`, which is the default. Writes wait for the approvals slice.
+  The task timeout defaults to 30 minutes. Readonly is the default `hrn.mode`. The `auto` mode asks for [write approval](approvals.md).
   Settings with `workspace_roots` must name `hrn.backend`, or they fail to
   load, since hrn's own routing could pick a metered backend. The `api`
   backend requires `allow_metered`.
@@ -60,7 +59,7 @@ Provider redirects are refused so the request stays on the configured endpoint.
   `api_key_env` variable from hrn's environment. On Windows, delegation
   refuses to launch if a provider names `SYSTEMROOT` as its key variable.
   Protocol errors include the available stderr tail.
-- Configured MCP stdio servers must declare a `read` effect. Their tools are
+- Configured MCP stdio servers must declare a `read` or `write` effect. Their tools are
   exposed as `<server>__<tool>` after initialization and discovery, with
   names limited to 64 ASCII letters, digits, underscores and hyphens.
   Ada replaces other characters with underscores and refuses duplicate
@@ -86,7 +85,6 @@ Timeout settings use Go duration strings such as `30m` and `1h`.
 
 ## Later slices
 
-Channels (#4) add chat integrations. Approvals
-(#5) add approval flows for effects. Scheduling (#6) adds scheduled work.
+Channels (#4) add chat integrations. Scheduling (#6) adds scheduled work.
 Learning (#7) adds learning proposals. Isolation (#8) adds stronger execution
 boundaries.

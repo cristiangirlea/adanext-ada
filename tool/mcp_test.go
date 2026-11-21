@@ -93,9 +93,9 @@ func TestMCPRestartsAfterCanceledCall(t *testing.T) {
 }
 
 func TestMCPRejectsEffects(t *testing.T) {
-	for _, effect := range []Effect{DelegateEffect, "write", ""} {
+	for _, effect := range []Effect{DelegateEffect, Send, Account, ""} {
 		err := new(Registry).AddMCP(t.Context(), MCPConfig{Name: "blocked", Command: "must not run", Effect: effect})
-		if err == nil || !strings.Contains(err.Error(), "approvals are not built yet") {
+		if err == nil || !strings.Contains(err.Error(), "must declare effect read or write") {
 			t.Fatalf("AddMCP = %v", err)
 		}
 	}

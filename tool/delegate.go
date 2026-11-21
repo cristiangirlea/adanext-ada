@@ -37,53 +37,89 @@ func (Delegate) Spec() provider.ToolSpec {
 
 func (Delegate) Effect() Effect { return DelegateEffect }
 
-func (t Delegate) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+func (t Delegate) EffectFor(json.RawMessage) (Effect, error) {
+	switch t.Mode {
+	case "readonly":
+		return DelegateEffect, nil
+	case "auto":
+		return Write, nil
+	default:
+		return "", fmt.Errorf("hrn.mode must be readonly or auto")
+	}
+}
+
+func (t Delegate) task(raw json.RawMessage) (hrnexec.Task, error) {
 	var input struct {
 		Prompt  string          `json:"prompt"`
 		Dir     string          `json:"dir"`
 		Purpose json.RawMessage `json:"purpose"`
 	}
 	if err := decodeInput(raw, &input); err != nil {
-		return "", err
+		return hrnexec.Task{}, err
 	}
 	if input.Prompt == "" {
-		return "", fmt.Errorf("delegation prompt is required")
+		return hrnexec.Task{}, fmt.Errorf("delegation prompt is required")
 	}
-	if t.Mode != "readonly" {
-		return "", fmt.Errorf("configured hrn mode must be readonly because writes wait for the approvals slice")
+	if _, err := t.EffectFor(raw); err != nil {
+		return hrnexec.Task{}, err
 	}
 	// hrn's own routing could pick a metered backend, so settings must name one.
 	if strings.TrimSpace(t.Backend) == "" {
-		return "", fmt.Errorf("hrn.backend is required for delegation")
+		return hrnexec.Task{}, fmt.Errorf("hrn.backend is required for delegation")
 	}
 	var purpose string
 	if input.Purpose != nil {
 		if err := json.Unmarshal(input.Purpose, &purpose); err != nil {
-			return "", fmt.Errorf("decode delegation purpose: %w", err)
+			return hrnexec.Task{}, fmt.Errorf("decode delegation purpose: %w", err)
 		}
 		if !slices.Contains(delegatePurposes, purpose) {
-			return "", fmt.Errorf("invalid delegation purpose %q", purpose)
+			return hrnexec.Task{}, fmt.Errorf("invalid delegation purpose %q", purpose)
 		}
 	}
 	root, rel, err := withinRoots(input.Dir, t.Roots)
 	if err != nil {
-		return "", fmt.Errorf("delegate workspace: %w", err)
+		return hrnexec.Task{}, fmt.Errorf("delegate workspace: %w", err)
 	}
 	dir := filepath.Join(root, rel)
 	info, err := os.Stat(dir)
 	if err != nil {
-		return "", fmt.Errorf("inspect delegate workspace: %w", err)
+		return hrnexec.Task{}, fmt.Errorf("inspect delegate workspace: %w", err)
 	}
 	if !info.IsDir() {
-		return "", fmt.Errorf("delegate workspace must be a directory")
+		return hrnexec.Task{}, fmt.Errorf("delegate workspace must be a directory")
 	}
 	if t.Timeout <= 0 {
 		t.Timeout = DefaultDelegateTimeout
 	}
-	result, err := hrnexec.Run(ctx, t.Options, hrnexec.Task{
+	return hrnexec.Task{
 		Prompt: input.Prompt, Dir: dir, Backend: t.Backend, Mode: t.Mode,
 		Timeout: t.Timeout.String(), Purpose: purpose,
-	}, nil)
+	}, nil
+}
+
+func delegateSummary(task hrnexec.Task) string {
+	return fmt.Sprintf("hrn exec backend=%q mode=%q dir=%q timeout=%s purpose=%q prompt=%q",
+		task.Backend, task.Mode, task.Dir, task.Timeout, task.Purpose, task.Prompt)
+}
+
+func (t Delegate) Summary(raw json.RawMessage) (string, error) {
+	task, err := t.task(raw)
+	if err != nil {
+		return "", err
+	}
+	return delegateSummary(task), nil
+}
+
+func (t Delegate) Run(ctx context.Context, raw json.RawMessage) (string, error) {
+	task, err := t.task(raw)
+	if err != nil {
+		return "", err
+	}
+	// Resolving the workspace again binds the launch to the directory shown before the wait.
+	if t.Mode == "auto" && ctx.Value(approvedSummaryKey{}) != delegateSummary(task) {
+		return "", fmt.Errorf("hrn auto mode requires approval for this exact task")
+	}
+	result, err := hrnexec.Run(ctx, t.Options, task, nil)
 	if err != nil {
 		return "", fmt.Errorf("delegate to hrn: %w", err)
 	}
