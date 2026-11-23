@@ -3,7 +3,9 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -559,5 +561,12 @@ func TestProfileWriterLock(t *testing.T) {
 	}
 	if facts := second.Facts("owner"); len(facts) != 1 {
 		t.Fatal(facts)
+	}
+}
+
+func TestLockFileInAMissingDirectoryStillFails(t *testing.T) {
+	s, _ := testStore(t)
+	if _, err := s.lockFile(filepath.Join("absent", "x.lock")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("got %v, want a missing-file error", err)
 	}
 }

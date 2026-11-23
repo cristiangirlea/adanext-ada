@@ -122,7 +122,7 @@ func TestKeepRefusedByFullProfile(t *testing.T) {
 	}
 }
 
-func TestConcurrentReviewsAndKeeps(t *testing.T) {
+func concurrentReviewsAndKeeps(t *testing.T) {
 	f := setup(t)
 	f.append(t, "me", "user", "text", "hello")
 	second, err := memory.NewStore(f.dir)
@@ -202,5 +202,12 @@ func TestRollbackAfterManualRemoval(t *testing.T) {
 	}
 	if p, err = f.Decide("owner", p.ID, "rollback", false, time.Now()); err != nil || p.Status != "rolled_back" || !slices.Equal(f.Memory.Facts("owner"), []memory.Fact{replacement}) {
 		t.Fatal(p, err)
+	}
+}
+
+// Each round creates fresh lock files, the moment two stores race to create them.
+func TestConcurrentReviewsAndKeeps(t *testing.T) {
+	for i := range 25 {
+		t.Run(fmt.Sprint(i), concurrentReviewsAndKeeps)
 	}
 }
