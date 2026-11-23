@@ -15,10 +15,13 @@ import (
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
+	"github.com/cristiangirlea/adanext-ada/schedule"
 	p "github.com/cristiangirlea/harness/contracts/pluginproto"
 )
 
 type Service struct {
+	Scheduler  *schedule.Runner
+	connected  map[string]*Host
 	Store      *memory.Store
 	Loop       *loop.Loop
 	Owner      string
@@ -105,8 +108,14 @@ func prefixBytes(text string, end int) string {
 
 // Preserve the whole model answer across the wire text and UTF-8 boundaries.
 func (h *Host) answer(in *p.Inbound, text string) error {
+	parts := answerParts(in.Chat.ID, &in.ID, text)
+	// Commit every part with the completion evidence before exposing any part to the plugin.
+	return h.ledger.record(outRecord{Deliver: &parts[0], Continuation: parts[1:], Completes: in.ID})
+}
+
+func answerParts(chat string, reply *string, text string) []p.Deliver {
 	delivery := func(part string) p.Deliver {
-		return p.Deliver{Type: p.TypeDeliver, ID: rand.Text()[:12], ChatID: in.Chat.ID, ReplyTo: &in.ID, Text: part}
+		return p.Deliver{Type: p.TypeDeliver, ID: rand.Text()[:12], ChatID: chat, ReplyTo: reply, Text: part}
 	}
 	text = cleanText(text)
 	var parts []p.Deliver
@@ -116,8 +125,7 @@ func (h *Host) answer(in *p.Inbound, text string) error {
 		text = text[len(chunk):]
 	}
 	parts = append(parts, delivery(text))
-	// Commit every part with the completion evidence before exposing any part to the plugin.
-	return h.ledger.record(outRecord{Deliver: &parts[0], Continuation: parts[1:], Completes: in.ID})
+	return parts
 }
 
 func (h *Host) receive(ctx context.Context, in *p.Inbound, replay bool) error {
@@ -191,6 +199,7 @@ func (h *Host) turn(ctx context.Context, user string, in *p.Inbound, replay bool
 		return err
 	}
 	ctx = approval.WithSession(memory.WithUser(ctx, user), session.ID)
+	ctx = schedule.WithOrigin(ctx, schedule.Target{Channel: h.Name, Chat: in.Chat.ID})
 	ctx = approval.WithApprover(ctx, &ChannelApprover{host: h, in: in, user: user})
 	answer, next, err := s.Loop.Turn(ctx, history, in.Text)
 	if ctx.Err() != nil {

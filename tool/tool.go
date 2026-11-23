@@ -36,7 +36,23 @@ type Summarizer interface {
 	Summary(json.RawMessage) (string, error)
 }
 
+// ContextSummarizer validates arguments that depend on the originating surface.
+type ContextSummarizer interface {
+	SummaryFor(context.Context, json.RawMessage) (string, error)
+}
+
+var ErrNoApprover = errors.New("no way to ask for approval here")
+
 type approvedSummaryKey struct{}
+type approvalTimeKey struct{}
+
+// ApprovalTime anchors relative times in the executed action to the displayed request.
+func ApprovalTime(ctx context.Context) time.Time {
+	if at, ok := ctx.Value(approvalTimeKey{}).(time.Time); ok {
+		return at
+	}
+	return time.Now()
+}
 
 type Tool interface {
 	Spec() provider.ToolSpec
@@ -106,7 +122,12 @@ func (r *Registry) Run(ctx context.Context, name string, input json.RawMessage) 
 	case Read, DelegateEffect:
 		return t.Run(ctx, input)
 	case Write, Send:
-		return r.runWithApproval(ctx, t, name, effect, input)
+		result, err := r.runWithApproval(ctx, t, name, effect, input)
+		// A malformed request still needs a user when an unattended turn tries a write.
+		if _, ok := approval.ApproverFrom(ctx); !ok && err != nil && !errors.Is(err, ErrNoApprover) {
+			return "", fmt.Errorf("%w: %w", ErrNoApprover, err)
+		}
+		return result, err
 	case Account:
 		return "", fmt.Errorf("%s refused: Ada never touches money or accounts", name)
 	default:
@@ -134,14 +155,17 @@ func (r *Registry) runWithApproval(ctx context.Context, t Tool, name string, eff
 		return "", fmt.Errorf("encode arguments for %s: %w", name, err)
 	}
 	summary := name + " " + string(input)
-	if s, ok := t.(Summarizer); ok {
+	if s, ok := t.(ContextSummarizer); ok {
+		ctx = context.WithValue(ctx, approvalTimeKey{}, time.Now())
+		summary, err = s.SummaryFor(ctx, input)
+	} else if s, ok := t.(Summarizer); ok {
 		summary, err = s.Summary(input)
-		if err != nil {
-			return "", fmt.Errorf("summarize %s: %w", name, err)
-		}
-		if strings.TrimSpace(summary) == "" {
-			return "", fmt.Errorf("%s refused: missing approval summary", name)
-		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("summarize %s: %w", name, err)
+	}
+	if strings.TrimSpace(summary) == "" {
+		return "", fmt.Errorf("%s refused: missing approval summary", name)
 	}
 	req := approval.NewRequest(ctx, name, string(effect), summary, r.ApprovalTimeout)
 	d, askErr := approval.Decide(ctx, req)
@@ -156,7 +180,7 @@ func (r *Registry) runWithApproval(ctx context.Context, t Tool, name string, eff
 			return "", fmt.Errorf("%s refused: could not read a decision from the approval surface", name)
 		}
 		if d.Reason == "no approver" {
-			return "", fmt.Errorf("%s refused: no way to ask for approval here", name)
+			return "", fmt.Errorf("%s refused: %w", name, ErrNoApprover)
 		}
 		return "", fmt.Errorf("%s refused: approval %s", name, d.Reason)
 	}

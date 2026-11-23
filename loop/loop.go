@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -30,6 +31,7 @@ func (b Budget) WithDefaults() Budget {
 }
 
 type Loop struct {
+	StopOnApproval bool
 	provider.Provider
 	Tools     *tool.Registry
 	System    string
@@ -103,6 +105,9 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 					text, err := l.Tools.Run(turnCtx, block.Name, block.Input)
 					if err != nil {
 						result.Text, result.IsError = err.Error(), true
+						if l.StopOnApproval && errors.Is(err, tool.ErrNoApprover) {
+							stop = fmt.Sprintf("This job needs the user to do this step: %s.", block.Name)
+						}
 					} else {
 						result.Text = text
 					}

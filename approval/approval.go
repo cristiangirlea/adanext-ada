@@ -47,6 +47,9 @@ type approverKey struct{}
 type sessionKey struct{}
 
 func WithApprover(ctx context.Context, a Approver) context.Context {
+	if a == nil {
+		return context.WithValue(ctx, approverKey{}, struct{}{})
+	}
 	return context.WithValue(ctx, approverKey{}, a)
 }
 

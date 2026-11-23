@@ -49,6 +49,42 @@ func Configure(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow, HideWindow: true}
 }
 
+// Start assigns the suspended process before its first instruction can spawn a child.
+func Start(cmd *exec.Cmd) (kill, release func(), err error) {
+	Configure(cmd)
+	const createSuspended = 0x4
+	cmd.SysProcAttr.CreationFlags |= createSuspended
+	if err := cmd.Start(); err != nil {
+		return nil, nil, err
+	}
+	kill, release, err = Manage(cmd)
+	if err == nil {
+		const suspendResume = 0x0800
+		var handle syscall.Handle
+		handle, err = syscall.OpenProcess(suspendResume, false, uint32(cmd.Process.Pid))
+		if err == nil {
+			resume := syscall.NewLazyDLL("ntdll.dll").NewProc("NtResumeProcess")
+			err = resume.Find()
+			if err == nil {
+				status, _, _ := resume.Call(uintptr(handle))
+				if status != 0 {
+					err = fmt.Errorf("resume process: NTSTATUS %#x", status)
+				}
+			}
+			syscall.CloseHandle(handle)
+		}
+	}
+	if err != nil {
+		cmd.Process.Kill()
+		if release != nil {
+			release()
+		}
+		cmd.Wait()
+		return nil, nil, err
+	}
+	return kill, release, nil
+}
+
 func Manage(cmd *exec.Cmd) (kill, close func(), err error) {
 	job, _, err := createJobObject.Call(0, 0)
 	if job == 0 {

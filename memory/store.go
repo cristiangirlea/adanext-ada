@@ -40,12 +40,13 @@ type Origin struct {
 }
 
 type Session struct {
-	ID      string     `json:"id"`
-	User    string     `json:"user"`
-	Created time.Time  `json:"created"`
-	Updated time.Time  `json:"updated"`
-	Origins []Origin   `json:"origins"`
-	Inbound InboundRef `json:"inbound,omitzero"`
+	ScheduledJob string     `json:"scheduled_job,omitempty"`
+	ID           string     `json:"id"`
+	User         string     `json:"user"`
+	Created      time.Time  `json:"created"`
+	Updated      time.Time  `json:"updated"`
+	Origins      []Origin   `json:"origins"`
+	Inbound      InboundRef `json:"inbound,omitzero"`
 }
 
 // InboundRef identifies a message within its channel's ID namespace.
@@ -133,6 +134,32 @@ func (s *Store) LockSessions() (func(), error) {
 
 type userKey struct{}
 
+// WithScheduleFiles holds the cross-process lock only for the file transaction.
+func (s *Store) WithScheduleFiles(fn func(*os.Root) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.root.MkdirAll("schedule", 0700); err != nil {
+		return fmt.Errorf("create schedule directory: %w", err)
+	}
+	lockPath := filepath.Join("schedule", "schedule.lock")
+	file, err := s.lockFile(lockPath)
+	// A concurrent CLI edit should not cost a completed job its run record.
+	for deadline := time.Now().Add(5 * time.Second); errors.Is(err, errDirectoryBusy) && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		file, err = s.lockFile(lockPath)
+	}
+	if err != nil {
+		return err
+	}
+	defer releaseLock(file)
+	root, err := s.root.OpenRoot("schedule")
+	if err != nil {
+		return fmt.Errorf("open schedule directory: %w", err)
+	}
+	defer root.Close()
+	return fn(root)
+}
+
 func WithUser(ctx context.Context, user string) context.Context {
 	return context.WithValue(ctx, userKey{}, user)
 }
@@ -157,12 +184,17 @@ func readJSON(root *os.Root, path string, value any) error {
 }
 
 func (s *Store) writeJSON(path string, value any) error {
+	return WriteJSON(s.root, path, value)
+}
+
+// WriteJSON publishes a synced private file with a same-directory rename.
+func WriteJSON(root *os.Root, path string, value any) error {
 	tmp := filepath.Join(filepath.Dir(path), ".tmp-"+rand.Text())
-	file, err := s.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return fmt.Errorf("create temporary file: %w", err)
 	}
-	defer s.root.Remove(tmp)
+	defer root.Remove(tmp)
 	err = json.NewEncoder(file).Encode(value)
 	if err == nil {
 		err = file.Sync()
@@ -170,7 +202,7 @@ func (s *Store) writeJSON(path string, value any) error {
 	if err = errors.Join(err, file.Close()); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
-	if err := s.root.Rename(tmp, path); err != nil {
+	if err := root.Rename(tmp, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
@@ -311,6 +343,15 @@ func validOrigin(channel, chat, sender string) bool {
 }
 
 func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Session, error) {
+	return s.open(user, channel, chat, sender, idle, "")
+}
+
+// OpenScheduled keeps a job's history separate even when the owner chats between runs.
+func (s *Store) OpenScheduled(user, job string) (Session, error) {
+	return s.open(user, "schedule", job, user, 0, job)
+}
+
+func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job string) (Session, error) {
 	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
@@ -319,7 +360,7 @@ func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Se
 	if s.sessionLock == nil {
 		return Session{}, errWriterRequired
 	}
-	list, err := s.list(user, 1)
+	list, err := s.list(user, 0)
 	if err != nil {
 		return Session{}, err
 	}
@@ -328,14 +369,15 @@ func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Se
 	}
 	now := time.Now().UTC()
 	origin := Origin{channel, chat, sender, now}
+	list = slices.DeleteFunc(list, func(item Session) bool { return item.ScheduledJob != job })
 	if len(list) == 0 {
-		return s.create(user, origin, InboundRef{})
+		return s.createSession(user, origin, InboundRef{}, job)
 	}
 	session := list[0]
 	if err := s.recoverAppend(session); err != nil {
 		return Session{}, err
 	}
-	if now.Sub(session.Updated) > idle {
+	if job == "" && now.Sub(session.Updated) > idle {
 		return s.create(user, origin, InboundRef{})
 	}
 	for _, o := range session.Origins {
@@ -377,11 +419,15 @@ func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID stri
 }
 
 func (s *Store) create(user string, o Origin, ref InboundRef) (Session, error) {
+	return s.createSession(user, o, ref, "")
+}
+
+func (s *Store) createSession(user string, o Origin, ref InboundRef, job string) (Session, error) {
 	if s.sessionLock == nil {
 		return Session{}, errWriterRequired
 	}
 	id := o.FirstSeen.Format("20060102T150405") + "-" + rand.Text()
-	session := Session{ID: id, User: user, Created: o.FirstSeen, Updated: o.FirstSeen, Origins: []Origin{o}, Inbound: ref}
+	session := Session{ID: id, User: user, Created: o.FirstSeen, Updated: o.FirstSeen, Origins: []Origin{o}, Inbound: ref, ScheduledJob: job}
 	// Publish the directory only once both session files exist.
 	stage := sessionPath(".new-"+id, "")
 	if err := s.root.Mkdir(stage, 0700); err != nil {

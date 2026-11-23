@@ -22,6 +22,7 @@ import (
 	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/config"
 	"github.com/cristiangirlea/adanext-ada/memory"
+	"github.com/cristiangirlea/adanext-ada/schedule"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
 
@@ -156,12 +157,41 @@ func main() {
 	}
 }
 
+func buildConversation(s config.Settings) (*config.App, error) {
+	app, err := config.Build(s, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	if err := app.Tools.Add(schedule.PromptTool{Store: schedule.Store{Memory: app.Store}}); err != nil {
+		app.Tools.Close()
+		app.Store.Close()
+		return nil, err
+	}
+	return app, nil
+}
+
+func newServeService(settings config.Settings, conversation *config.App, diagnostics io.Writer) *channel.Service {
+	var statusMu sync.Mutex
+	service := channel.Service{
+		Store: conversation.Store, Loop: conversation.Loop, Owner: settings.Owner,
+		Idle: settings.SessionIdle, History: settings.HistoryMessages,
+		WithoutEnv: settings.ProviderKeyEnv(),
+		Status: func(line string) {
+			statusMu.Lock()
+			defer statusMu.Unlock()
+			fmt.Fprintln(diagnostics, terminalField(line))
+		},
+	}
+	service.Scheduler = &schedule.Runner{Store: schedule.Store{Memory: conversation.Store}, Loop: conversation.Loop, Owner: settings.Owner, History: settings.HistoryMessages, WithoutEnv: service.WithoutEnv, Deliver: service.Deliver, Status: service.Status}
+	return &service
+}
+
 func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.Writer) error {
 	if len(args) == 1 && args[0] == "version" {
 		_, err := fmt.Fprintln(out, "ada", ada.Version())
 		return err
 	}
-	const usage = "usage: ada chat | serve | channels | pair | unpair | profile | sessions | approvals | search | version"
+	const usage = "usage: ada chat | serve | schedule | channels | pair | unpair | profile | sessions | approvals | search | version"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -179,7 +209,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		flags.IntVar(&n, "n", 20, "maximum number of sessions")
 	case "approvals":
 		flags.IntVar(&n, "n", 20, "maximum number of approvals")
-	case "profile", "search", "serve", "channels", "pair", "unpair":
+	case "profile", "search", "serve", "channels", "pair", "unpair", "schedule":
 	default:
 		return errors.New(usage)
 	}
@@ -188,6 +218,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 			return nil
 		}
 		return err
+	}
+	if args[0] == "schedule" {
+		return scheduleCommand(ctx, flags.Args(), *path, out)
 	}
 	settings, err := config.Load(*path)
 	if err != nil {
@@ -225,7 +258,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		}
 		return fmt.Errorf("usage: ada chat [-config FILE] [-new | -resume ID]")
 	}
-	conversation, err := config.Build(settings, os.Getenv)
+	conversation, err := buildConversation(settings)
 	if err != nil {
 		return err
 	}
@@ -240,17 +273,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	if args[0] == "serve" {
 		ctx, stop := serveContext(ctx, signal.Notify)
 		defer stop()
-		var statusMu sync.Mutex
-		service := channel.Service{
-			Store: store, Loop: conversation.Loop, Owner: settings.Owner,
-			Idle: settings.SessionIdle, History: settings.HistoryMessages,
-			WithoutEnv: settings.ProviderKeyEnv(),
-			Status: func(line string) {
-				statusMu.Lock()
-				defer statusMu.Unlock()
-				fmt.Fprintln(diagnostics, terminalField(line))
-			},
-		}
+		service := newServeService(settings, conversation, diagnostics)
 		return service.Serve(ctx, settings.DataDir, settings.Channels)
 	}
 	owner := settings.Owner
@@ -268,6 +291,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		session, err = store.Get(resume)
 		if err == nil && session.User != user {
 			return fmt.Errorf("session does not belong to the CLI owner")
+		}
+		if err == nil && session.ScheduledJob != "" {
+			return fmt.Errorf("session belongs to scheduled job %s", session.ScheduledJob)
 		}
 	case fresh:
 		session, err = store.NewSession(user, "cli", "local", owner)
