@@ -21,6 +21,7 @@ import (
 )
 
 type Host struct {
+	receipts map[string]*receipt
 	Settings
 	ctx      context.Context
 	fail     context.CancelCauseFunc
@@ -53,7 +54,7 @@ func (s *Service) Serve(ctx context.Context, data string, settings []Settings) e
 		h.ctx, h.fail = context.WithCancelCause(ctx)
 		hosts = append(hosts, h)
 	}
-	if len(hosts) == 0 && len(failures) == 0 {
+	if len(hosts) == 0 && len(failures) == 0 && s.Scheduler == nil {
 		return fmt.Errorf("no enabled channels")
 	}
 	type result struct {
@@ -61,6 +62,15 @@ func (s *Service) Serve(ctx context.Context, data string, settings []Settings) e
 		err  error
 	}
 	done := make(chan result, len(hosts))
+	if s.Scheduler != nil {
+		run, stop := context.WithCancel(ctx)
+		finished := make(chan struct{})
+		go func() {
+			defer close(finished)
+			s.Scheduler.Serve(run)
+		}()
+		defer func() { stop(); <-finished }()
+	}
 	queueRecovered(hosts)
 	for _, h := range hosts {
 		go func() {
@@ -79,6 +89,15 @@ func (s *Service) Serve(ctx context.Context, data string, settings []Settings) e
 		}
 	}
 	s.workers.Wait()
+	if s.Scheduler != nil && ctx.Err() == nil {
+		jobs, err := s.Scheduler.Store.List()
+		if err != nil {
+			return err
+		}
+		if len(failures) == 0 || len(jobs) > 0 {
+			<-ctx.Done()
+		}
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return nil
 	}
@@ -364,6 +383,8 @@ func (h *Host) connected(ctx context.Context, c *process, timeout time.Duration)
 			return false, fmt.Errorf("expected ready for v2 channel %q", h.Name)
 		}
 	}
+	h.register()
+	defer h.unregister()
 	h.service.status(h.Name, "ready")
 	inFlight := map[string]bool{}
 	var queue []any
@@ -422,6 +443,7 @@ func (h *Host) connected(ctx context.Context, c *process, timeout time.Duration)
 					return false, err
 				}
 				delete(inFlight, f.ID)
+				h.received(f.ID, nil, false)
 			case *p.DeliveryFailed:
 				if !inFlight[f.ID] {
 					continue
@@ -430,6 +452,7 @@ func (h *Host) connected(ctx context.Context, c *process, timeout time.Duration)
 					return false, err
 				}
 				delete(inFlight, f.ID)
+				h.received(f.ID, fmt.Errorf("delivery failed (%s)", f.Error.Code), f.Error.Code == p.CodeRateLimited)
 				h.service.status(h.Name, fmt.Sprintf("delivery %s failed (%s)", f.ID, f.Error.Code))
 			case *p.Status:
 				h.service.status(h.Name, h.redact(f.State+" "+f.Text))

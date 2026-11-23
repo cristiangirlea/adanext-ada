@@ -85,6 +85,7 @@ Timeout settings use Go duration strings such as `30m` and `1h`.
 
 ## Later slices
 
-[Channels](channels.md) describes the plugin host and pairing. Scheduling (#6) adds scheduled work.
+[Channels](channels.md) describes the plugin host and pairing.
+[Scheduled jobs](schedule.md) run prompts or scripts during serve and deliver results to their configured chat.
 Learning (#7) adds learning proposals. Isolation (#8) adds stronger execution
 boundaries.

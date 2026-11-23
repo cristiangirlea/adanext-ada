@@ -31,6 +31,17 @@ func TestModelAnswerFitsProtocol(t *testing.T) {
 	if len(frames) != 2 || !utf8.ValidString(frames[0].Text) || frames[0].Text+frames[1].Text != strings.ReplaceAll(text, "\x1b", string(utf8.RuneError)) {
 		t.Fatal("answer was lost or split inside a rune")
 	}
+	data, err := os.ReadFile(l.outbox.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record outRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("expected one outbox record: %v", err)
+	}
+	if record.Completes != "id" || record.Deliver == nil || record.Deliver.ID != frames[0].ID || len(record.Continuation) != 1 || record.Continuation[0].ID != frames[1].ID {
+		t.Fatal("outbox record did not commit both parts with inbound completion")
+	}
 }
 
 func TestLedgerReopensPendingDelivery(t *testing.T) {
