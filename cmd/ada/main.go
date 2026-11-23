@@ -10,14 +10,16 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode"
 
+	ada "github.com/cristiangirlea/adanext-ada"
 	"github.com/cristiangirlea/adanext-ada/approval"
+	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/config"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/tool"
@@ -38,6 +40,21 @@ func terminalField(text string) string {
 
 func memoryCommand(command string, args []string, settings config.Settings, store *memory.Store, n int, out io.Writer) error {
 	switch command {
+	case "pair":
+		if len(args) != 1 {
+			return fmt.Errorf("usage: ada pair [-config FILE] CODE")
+		}
+		p, err := store.Pair(args[0], settings.Owner)
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(out, "Paired %s (%s) on %s to %s.\n", terminalField(p.Name), terminalField(p.Sender), terminalField(p.Channel), terminalField(settings.Owner))
+		return err
+	case "unpair":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: ada unpair [-config FILE] CHANNEL SENDER")
+		}
+		return store.Unlink(args[0], args[1])
 	case "approvals":
 		if len(args) != 0 || n < 1 {
 			return fmt.Errorf("usage: ada approvals [-n N], N must be positive")
@@ -141,14 +158,10 @@ func main() {
 
 func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.Writer) error {
 	if len(args) == 1 && args[0] == "version" {
-		version := "dev"
-		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-			version = info.Main.Version
-		}
-		_, err := fmt.Fprintln(out, "ada", version)
+		_, err := fmt.Fprintln(out, "ada", ada.Version())
 		return err
 	}
-	const usage = "usage: ada chat | profile | sessions | approvals | search | version"
+	const usage = "usage: ada chat | serve | channels | pair | unpair | profile | sessions | approvals | search | version"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -166,7 +179,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		flags.IntVar(&n, "n", 20, "maximum number of sessions")
 	case "approvals":
 		flags.IntVar(&n, "n", 20, "maximum number of approvals")
-	case "profile", "search":
+	case "profile", "search", "serve", "channels", "pair", "unpair":
 	default:
 		return errors.New(usage)
 	}
@@ -180,7 +193,25 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	if err != nil {
 		return err
 	}
-	if args[0] != "chat" {
+	if args[0] == "channels" {
+		if flags.NArg() != 0 {
+			return fmt.Errorf("usage: ada channels [-config FILE]")
+		}
+		for _, ch := range settings.Channels {
+			info, statErr := os.Stat(ch.Path)
+			found := statErr == nil && info.Mode().IsRegular()
+			manifest, err := ch.Manifest()
+			description := fmt.Sprintf("label=%q secret_env=%q hosts=%q", manifest.Label, manifest.SecretEnv, manifest.Hosts)
+			if err != nil {
+				description = terminalField(err.Error())
+			}
+			if _, err := fmt.Fprintf(out, "%s enabled=%t path=%q found=%t %s\n", ch.Name, ch.Enabled, ch.Path, found, description); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if args[0] != "chat" && args[0] != "serve" {
 		store, err := memory.NewStore(settings.DataDir)
 		if err != nil {
 			return err
@@ -189,6 +220,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return memoryCommand(args[0], flags.Args(), settings, store, n, out)
 	}
 	if flags.NArg() != 0 || fresh && resume != "" {
+		if args[0] == "serve" {
+			return fmt.Errorf("usage: ada serve [-config FILE]")
+		}
 		return fmt.Errorf("usage: ada chat [-config FILE] [-new | -resume ID]")
 	}
 	conversation, err := config.Build(settings, os.Getenv)
@@ -203,6 +237,22 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return err
 	}
 	defer unlock()
+	if args[0] == "serve" {
+		ctx, stop := serveContext(ctx, signal.Notify)
+		defer stop()
+		var statusMu sync.Mutex
+		service := channel.Service{
+			Store: store, Loop: conversation.Loop, Owner: settings.Owner,
+			Idle: settings.SessionIdle, History: settings.HistoryMessages,
+			WithoutEnv: settings.ProviderKeyEnv(),
+			Status: func(line string) {
+				statusMu.Lock()
+				defer statusMu.Unlock()
+				fmt.Fprintln(diagnostics, terminalField(line))
+			},
+		}
+		return service.Serve(ctx, settings.DataDir, settings.Channels)
+	}
 	owner := settings.Owner
 	if err := store.Link("cli", owner, owner); err != nil {
 		return err
@@ -405,4 +455,18 @@ func (s *cliSurface) Ask(ctx context.Context, r approval.Request) (approval.Deci
 		d.Reason = "approved"
 	}
 	return d, nil
+}
+
+func serveContext(parent context.Context, notify func(chan<- os.Signal, ...os.Signal)) (context.Context, context.CancelFunc) {
+	signals := make(chan os.Signal, 1)
+	notify(signals, os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-signals:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() { signal.Stop(signals); cancel() }
 }

@@ -40,11 +40,18 @@ type Origin struct {
 }
 
 type Session struct {
-	ID      string    `json:"id"`
-	User    string    `json:"user"`
-	Created time.Time `json:"created"`
-	Updated time.Time `json:"updated"`
-	Origins []Origin  `json:"origins"`
+	ID      string     `json:"id"`
+	User    string     `json:"user"`
+	Created time.Time  `json:"created"`
+	Updated time.Time  `json:"updated"`
+	Origins []Origin   `json:"origins"`
+	Inbound InboundRef `json:"inbound,omitzero"`
+}
+
+// InboundRef identifies a message within its channel's ID namespace.
+type InboundRef struct {
+	Channel string `json:"channel"`
+	ID      string `json:"id"`
 }
 
 type record struct {
@@ -53,6 +60,7 @@ type record struct {
 	Chat    string           `json:"chat"`
 	Sender  string           `json:"sender"`
 	Message provider.Message `json:"message"`
+	Inbound InboundRef       `json:"inbound,omitzero"`
 }
 
 func NewStore(dir string) (*Store, error) {
@@ -106,6 +114,9 @@ func (s *Store) LockSessions() (func(), error) {
 		return nil, errDirectoryBusy
 	}
 	file, err := s.lockFile("sessions.lock")
+	if errors.Is(err, errDirectoryBusy) {
+		return nil, fmt.Errorf("Ada is serving or chatting: %w", err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -173,20 +184,34 @@ func (s *Store) Link(channel, sender, user string) error {
 	if !ValidIdentity(channel) || !ValidIdentity(sender) || !ValidIdentity(user) {
 		return fmt.Errorf("invalid identity: expected 1..128 bytes without controls")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return s.withIdentities(func() error { return s.setLink(channel, sender, user) })
+}
+
+func (s *Store) links() (map[string]string, error) {
 	links := map[string]string{}
 	if err := readJSON(s.root, "identities.json", &links); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
+		return nil, err
 	}
 	if links == nil {
-		return fmt.Errorf("invalid identities.json: expected an object")
+		return nil, fmt.Errorf("invalid identities.json: expected an object")
+	}
+	return links, nil
+}
+
+func (s *Store) setLink(channel, sender, user string) error {
+	links, err := s.links()
+	if err != nil {
+		return err
 	}
 	key := channel + "\x00" + sender
 	if links[key] == user {
 		return nil
 	}
-	links[key] = user
+	if user == "" {
+		delete(links, key)
+	} else {
+		links[key] = user
+	}
 	return s.writeJSON("identities.json", links)
 }
 
@@ -304,14 +329,14 @@ func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Se
 	now := time.Now().UTC()
 	origin := Origin{channel, chat, sender, now}
 	if len(list) == 0 {
-		return s.create(user, origin)
+		return s.create(user, origin, InboundRef{})
 	}
 	session := list[0]
 	if err := s.recoverAppend(session); err != nil {
 		return Session{}, err
 	}
 	if now.Sub(session.Updated) > idle {
-		return s.create(user, origin)
+		return s.create(user, origin, InboundRef{})
 	}
 	for _, o := range session.Origins {
 		if o.Channel == channel && o.Chat == chat && o.Sender == sender {
@@ -326,20 +351,37 @@ func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Se
 }
 
 func (s *Store) NewSession(user, channel, chat, sender string) (Session, error) {
+	return s.NewSessionForInbound(user, channel, chat, sender, "")
+}
+
+func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID string) (Session, error) {
 	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.create(user, Origin{channel, chat, sender, time.Now().UTC()})
+	var ref InboundRef
+	if inboundID != "" {
+		ref = InboundRef{channel, inboundID}
+		list, err := s.list(user, 0)
+		if err != nil {
+			return Session{}, err
+		}
+		for _, session := range list {
+			if session.Inbound == ref {
+				return session, nil
+			}
+		}
+	}
+	return s.create(user, Origin{channel, chat, sender, time.Now().UTC()}, ref)
 }
 
-func (s *Store) create(user string, o Origin) (Session, error) {
+func (s *Store) create(user string, o Origin, ref InboundRef) (Session, error) {
 	if s.sessionLock == nil {
 		return Session{}, errWriterRequired
 	}
 	id := o.FirstSeen.Format("20060102T150405") + "-" + rand.Text()
-	session := Session{id, user, o.FirstSeen, o.FirstSeen, []Origin{o}}
+	session := Session{ID: id, User: user, Created: o.FirstSeen, Updated: o.FirstSeen, Origins: []Origin{o}, Inbound: ref}
 	// Publish the directory only once both session files exist.
 	stage := sessionPath(".new-"+id, "")
 	if err := s.root.Mkdir(stage, 0700); err != nil {
@@ -403,6 +445,10 @@ func (s *Store) recoverAppend(session Session) error {
 }
 
 func (s *Store) Append(id, channel, chat, sender string, msgs ...provider.Message) error {
+	return s.AppendInbound(id, channel, chat, sender, "", msgs...)
+}
+
+func (s *Store) AppendInbound(id, channel, chat, sender, inboundID string, msgs ...provider.Message) error {
 	if !validOrigin(channel, chat, sender) {
 		return fmt.Errorf("invalid message origin")
 	}
@@ -441,8 +487,12 @@ func (s *Store) Append(id, channel, chat, sender string, msgs ...provider.Messag
 		now = session.Updated.Add(time.Nanosecond)
 	}
 	enc := json.NewEncoder(file)
+	var ref InboundRef
+	if inboundID != "" {
+		ref = InboundRef{channel, inboundID}
+	}
 	for _, msg := range msgs {
-		err = enc.Encode(record{now, channel, chat, sender, msg})
+		err = enc.Encode(record{Time: now, Channel: channel, Chat: chat, Sender: sender, Message: msg, Inbound: ref})
 		if err != nil {
 			break
 		}
@@ -466,6 +516,37 @@ func (s *Store) Append(id, channel, chat, sender string, msgs ...provider.Messag
 	// A leftover marker is harmless once the metadata rename succeeds.
 	_ = s.root.Remove(marker)
 	return nil
+}
+
+// AnswerForInbound searches committed exchanges, including sessions since rotated by /new or idleness.
+func (s *Store) AnswerForInbound(user string, ref InboundRef) (string, bool, error) {
+	if !ValidIdentity(user) || ref.Channel == "" || ref.ID == "" {
+		return "", false, fmt.Errorf("invalid inbound reference or user")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list, err := s.list(user, 0)
+	if err != nil {
+		return "", false, err
+	}
+	for _, session := range list {
+		if !slices.ContainsFunc(session.Origins, func(o Origin) bool { return o.Channel == ref.Channel }) {
+			continue
+		}
+		var answer string
+		var found bool
+		err := s.visit(session, func(_ int, r record) bool {
+			if r.Inbound == ref && r.Message.Role == "assistant" {
+				answer, found = r.Message.Text(), true
+			}
+			// All records of an exchange were appended together.
+			return !found || r.Inbound == ref
+		})
+		if err != nil || found {
+			return answer, found, err
+		}
+	}
+	return "", false, nil
 }
 
 // visit reads one JSON line at a time, including messages larger than a scanner buffer.

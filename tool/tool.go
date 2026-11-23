@@ -15,6 +15,9 @@ import (
 	"github.com/cristiangirlea/adanext-ada/provider"
 )
 
+// InheritedEnvNames returns the system variables shared by stdio plugins.
+func InheritedEnvNames() []string { return slices.Clone(mcpInheritedEnv) }
+
 type Effect string
 
 const (

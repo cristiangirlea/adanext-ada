@@ -1,16 +1,16 @@
 //go:build !windows
 
-package hrnexec
+package proctree
 
 import (
 	"os/exec"
 	"syscall"
 )
 
-func setProcessAttributes(cmd *exec.Cmd) {
+func Configure(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func manageProcessTree(cmd *exec.Cmd) (kill, close func(), err error) {
+func Manage(cmd *exec.Cmd) (kill, close func(), err error) {
 	return func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }, func() {}, nil
 }

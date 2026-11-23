@@ -34,8 +34,8 @@ You can continue chatting. A late confirmation code is discarded.
 Ada shows only one prompt at a time. Without an approver, the call is refused.
 
 Only the surface asking the user supplies a decision. Chat history, model
-messages, pages, email and tool output cannot grant approval. Channels (#4)
-and the desktop (#9) will ask on their own surfaces.
+messages, pages, email and tool output cannot grant approval. [Channel plugins](channels.md) present buttons bound to the original sender, chat and delivery.
+The desktop will ask on its own surface.
 
 ## History
 
