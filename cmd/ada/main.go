@@ -191,7 +191,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		_, err := fmt.Fprintln(out, "ada", ada.Version())
 		return err
 	}
-	const usage = "usage: ada chat | serve | schedule | channels | pair | unpair | profile | sessions | approvals | search | version"
+	const usage = "usage: ada chat | serve | schedule | channels | pair | unpair | profile | learn | sessions | approvals | search | version"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -209,7 +209,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		flags.IntVar(&n, "n", 20, "maximum number of sessions")
 	case "approvals":
 		flags.IntVar(&n, "n", 20, "maximum number of approvals")
-	case "profile", "search", "serve", "channels", "pair", "unpair", "schedule":
+	case "profile", "search", "serve", "channels", "pair", "unpair", "schedule", "learn":
 	default:
 		return errors.New(usage)
 	}
@@ -221,6 +221,9 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 	}
 	if args[0] == "schedule" {
 		return scheduleCommand(ctx, flags.Args(), *path, out)
+	}
+	if args[0] == "learn" {
+		return learnCommand(ctx, flags.Args(), *path, out)
 	}
 	settings, err := config.Load(*path)
 	if err != nil {
