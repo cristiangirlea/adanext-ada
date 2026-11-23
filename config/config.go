@@ -47,6 +47,8 @@ type Settings struct {
 }
 
 type LearningSettings struct {
+	ProposeEvery time.Duration
+	OfferTTL     time.Duration
 	StaleAfter   time.Duration
 	ArchiveAfter time.Duration
 }
@@ -61,8 +63,10 @@ type HRNSettings struct {
 
 type fileSettings struct {
 	Learning struct {
-		StaleAfter   string `json:"stale_after"`
-		ArchiveAfter string `json:"archive_after"`
+		ProposeEvery json.RawMessage `json:"propose_every"`
+		OfferTTL     string          `json:"offer_ttl"`
+		StaleAfter   string          `json:"stale_after"`
+		ArchiveAfter string          `json:"archive_after"`
 	} `json:"learning"`
 	Approvals struct {
 		Timeout string `json:"timeout"`
@@ -114,6 +118,25 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	every := "1h"
+	if string(data.Learning.ProposeEvery) == "0" {
+		every = "0"
+	} else if data.Learning.ProposeEvery != nil {
+		if err := json.Unmarshal(data.Learning.ProposeEvery, &every); err != nil {
+			return Settings{}, fmt.Errorf("parse learning.propose_every: %w", err)
+		}
+		if every == "" {
+			every = "1h"
+		}
+	}
+	s.Learning.ProposeEvery, err = parseTimeout("learning.propose_every", every)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.Learning.OfferTTL, err = parseTimeout("learning.offer_ttl", data.Learning.OfferTTL)
+	if err != nil {
+		return Settings{}, err
+	}
 	s.Learning.StaleAfter, err = parseTimeout("learning.stale_after", data.Learning.StaleAfter)
 	if err != nil {
 		return Settings{}, err
@@ -210,6 +233,9 @@ func (s Settings) validate() error {
 }
 
 func (s *Settings) setDefaults() error {
+	if s.Learning.OfferTTL == 0 {
+		s.Learning.OfferTTL = 168 * time.Hour
+	}
 	if s.Learning.StaleAfter == 0 {
 		s.Learning.StaleAfter = 2160 * time.Hour
 	}

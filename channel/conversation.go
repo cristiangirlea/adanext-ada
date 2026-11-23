@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cristiangirlea/adanext-ada/approval"
+	"github.com/cristiangirlea/adanext-ada/learn"
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
@@ -20,18 +21,22 @@ import (
 )
 
 type Service struct {
-	Scheduler  *schedule.Runner
-	connected  map[string]*Host
-	Store      *memory.Store
-	Loop       *loop.Loop
-	Owner      string
-	Idle       time.Duration
-	History    int
-	WithoutEnv []string
-	Status     func(string)
-	mu         sync.Mutex
-	users      map[string]*queue
-	workers    sync.WaitGroup
+	ProposeEvery time.Duration
+	OfferTTL     time.Duration
+	Decision     func(user string, press learn.ButtonPress) (bool, error)
+	Scheduler    *schedule.Runner
+	connected    map[string]*Host
+	hosts        map[string]*Host // Open ledgers, including plugins between connections.
+	Store        *memory.Store
+	Loop         *loop.Loop
+	Owner        string
+	Idle         time.Duration
+	History      int
+	WithoutEnv   []string
+	Status       func(string)
+	mu           sync.Mutex
+	users        map[string]*queue
+	workers      sync.WaitGroup
 }
 
 func (s *Service) status(name, message string) {
@@ -136,6 +141,8 @@ func (h *Host) receive(ctx context.Context, in *p.Inbound, replay bool) error {
 	user, paired := s.Store.Resolve(h.Name, in.Sender.ID)
 	var err error
 	switch {
+	case !paired && in.Action != nil:
+		// An unknown button press never starts a pairing conversation.
 	case !paired:
 		if !replay {
 			var code string
@@ -145,7 +152,7 @@ func (h *Host) receive(ctx context.Context, in *p.Inbound, replay bool) error {
 			}
 		}
 	case in.Action != nil:
-		h.action(in, user)
+		err = h.action(in, user, replay)
 	case in.Text == "":
 	case in.Text == "/stop":
 		message := "Nothing is running."
@@ -158,6 +165,15 @@ func (h *Host) receive(ctx context.Context, in *p.Inbound, replay bool) error {
 		err = h.answer(in, message)
 	case (strings.EqualFold(in.Text, "approve") || strings.EqualFold(in.Text, "deny")) && h.awaiting(in, user):
 	default:
+		if s.Decision != nil && (strings.EqualFold(in.Text, "keep") || strings.EqualFold(in.Text, "reject")) {
+			waiting, err := h.awaitingOffer(in, user)
+			if err != nil {
+				s.status(h.Name, fmt.Sprintf("check learning offer: %v", err))
+			}
+			if waiting || err != nil {
+				return h.ledger.processed(in.ID)
+			}
+		}
 		s.enqueue(ctx, user, job{host: h, in: in, replay: replay})
 		return nil
 	}
@@ -174,8 +190,9 @@ func (h *Host) turn(ctx context.Context, user string, in *p.Inbound, replay bool
 	if current, ok := s.Store.Resolve(h.Name, in.Sender.ID); !ok || user != current {
 		return nil
 	}
+	origin := memory.Origin{Channel: h.Name, Chat: in.Chat.ID, Sender: in.Sender.ID, Private: in.Chat.Type != nil && *in.Chat.Type == p.ChatPrivate}
 	if in.Text == "/new" {
-		if _, err := s.Store.NewSessionForInbound(user, h.Name, in.Chat.ID, in.Sender.ID, in.ID); err != nil {
+		if _, err := s.Store.NewSessionAt(user, origin, in.ID); err != nil {
 			return err
 		}
 		return h.answer(in, "Started a new session.")
@@ -190,7 +207,7 @@ func (h *Host) turn(ctx context.Context, user string, in *p.Inbound, replay bool
 			return h.answer(in, saved)
 		}
 	}
-	session, err := s.Store.Open(user, h.Name, in.Chat.ID, in.Sender.ID, s.Idle)
+	session, err := s.Store.OpenAt(user, origin, s.Idle)
 	if err != nil {
 		return err
 	}
@@ -217,7 +234,7 @@ func (h *Host) turn(ctx context.Context, user string, in *p.Inbound, replay bool
 	if last.Text() != answer {
 		last.Content = []provider.Block{{Type: "text", Text: answer}}
 	}
-	if err := s.Store.AppendInbound(session.ID, h.Name, in.Chat.ID, in.Sender.ID, in.ID, next[len(history):]...); err != nil {
+	if err := s.Store.AppendAt(session.ID, origin, in.ID, next[len(history):]...); err != nil {
 		return err
 	}
 	return h.answer(in, answer)

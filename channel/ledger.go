@@ -18,7 +18,8 @@ import (
 )
 
 type pending struct {
-	msg      p.Deliver
+	p.Deliver
+	offer    *offerTarget
 	failures int
 	due      time.Time
 }
@@ -116,12 +117,12 @@ func openLedger(data, name string) (*ledger, error) {
 		var remaining []string
 		for _, id := range l.order {
 			item := l.pending[id]
-			// A button prompt is bound to an in-memory approval from the previous serve.
-			if len(item.msg.Buttons) > 0 {
+			// Only learning buttons have a binding that survives this process.
+			if len(item.Buttons) > 0 && item.offer == nil {
 				delete(l.pending, id)
 				continue
 			}
-			if err := enc.Encode(outRecord{Deliver: &item.msg, Failures: item.failures, Due: item.due}); err != nil {
+			if err := enc.Encode(outRecord{Deliver: &item.Deliver, Offer: item.offer, Failures: item.failures, Due: item.due}); err != nil {
 				return err
 			}
 			remaining = append(remaining, id)
@@ -235,6 +236,7 @@ func (l *ledger) accept(in *p.Inbound) (bool, error) {
 }
 
 type outRecord struct {
+	Offer        *offerTarget      `json:"offer,omitempty"`
 	Completes    string            `json:"completes,omitempty"`
 	Continuation []p.Deliver       `json:"continuation,omitempty"`
 	Failures     int               `json:"failures,omitempty"`
@@ -250,7 +252,7 @@ func (l *ledger) apply(r outRecord) error {
 		if l.pending[d.ID] != nil {
 			return fmt.Errorf("duplicate pending delivery")
 		}
-		l.pending[d.ID] = &pending{msg: *d, failures: r.Failures, due: r.Due}
+		l.pending[d.ID] = &pending{Deliver: *d, offer: r.Offer, failures: r.Failures, due: r.Due}
 		l.order = append(l.order, d.ID)
 		for i := range r.Continuation {
 			if err := l.apply(outRecord{Deliver: &r.Continuation[i]}); err != nil {
@@ -328,12 +330,12 @@ func validateDelivery(d p.Deliver) error {
 	}
 	return nil
 }
-func (l *ledger) ready(inFlight map[string]bool) ([]p.Deliver, time.Time) {
+func (l *ledger) ready(inFlight map[string]bool) ([]pending, time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
 	var next time.Time
-	var ready []p.Deliver
+	var ready []pending
 	for _, id := range l.order {
 		item := l.pending[id]
 		if inFlight[id] {
@@ -345,7 +347,7 @@ func (l *ledger) ready(inFlight map[string]bool) ([]p.Deliver, time.Time) {
 			}
 			continue
 		}
-		ready = append(ready, item.msg)
+		ready = append(ready, *item)
 		inFlight[id] = true
 	}
 	return ready, next

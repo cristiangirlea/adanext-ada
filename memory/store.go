@@ -33,6 +33,7 @@ type Store struct {
 }
 
 type Origin struct {
+	Private   bool      `json:"private,omitempty"`
 	Channel   string    `json:"channel"`
 	Chat      string    `json:"chat"`
 	Sender    string    `json:"sender"`
@@ -271,6 +272,26 @@ func (s *Store) setLink(channel, sender, user string) error {
 	return s.writeJSON("identities.json", links)
 }
 
+// LinkedUsers includes the configured owner even before the first pairing.
+func (s *Store) LinkedUsers(owner string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	links, err := s.links()
+	if err != nil {
+		return nil, err
+	}
+	users := []string{owner}
+	for key, user := range links {
+		channel, sender, ok := strings.Cut(key, "\x00")
+		if !ok || !ValidIdentity(channel) || !ValidIdentity(sender) || !ValidIdentity(user) {
+			return nil, fmt.Errorf("invalid linked identity")
+		}
+		users = append(users, user)
+	}
+	slices.Sort(users)
+	return slices.Compact(users), nil
+}
+
 func (s *Store) Resolve(channel, sender string) (string, bool) {
 	if !ValidIdentity(channel) || !ValidIdentity(sender) {
 		return "", false
@@ -315,6 +336,42 @@ func (s *Store) get(id string) (Session, error) {
 		return Session{}, fmt.Errorf("invalid session metadata for %q", id)
 	}
 	return session, nil
+}
+
+// Origins record first visits; a committed turn can return to an earlier origin.
+func (s *Store) LatestOrigin(user, id string) (Origin, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.get(id)
+	if err != nil {
+		return Origin{}, err
+	}
+	if session.User != user {
+		return Origin{}, fmt.Errorf("session does not belong to the user")
+	}
+	if session.ScheduledJob != "" || len(session.Origins) == 0 {
+		return Origin{}, nil
+	}
+	latest := session.Origins[len(session.Origins)-1]
+	if len(session.Origins) == 1 {
+		return latest, nil
+	}
+	channel, chat, sender := latest.Channel, latest.Chat, latest.Sender
+	err = s.visit(session, func(_ int, r record) bool {
+		if !r.Time.Before(latest.FirstSeen) {
+			channel, chat, sender = r.Channel, r.Chat, r.Sender
+		}
+		return true
+	})
+	if err != nil {
+		return Origin{}, err
+	}
+	for _, origin := range session.Origins {
+		if origin.Channel == channel && origin.Chat == chat && origin.Sender == sender {
+			return origin, nil
+		}
+	}
+	return Origin{}, fmt.Errorf("message origin missing from session %q", id)
 }
 
 func (s *Store) Get(id string) (Session, error) {
@@ -367,16 +424,20 @@ func validOrigin(channel, chat, sender string) bool {
 }
 
 func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Session, error) {
-	return s.open(user, channel, chat, sender, idle, "")
+	return s.OpenAt(user, Origin{Channel: channel, Chat: chat, Sender: sender}, idle)
+}
+
+func (s *Store) OpenAt(user string, origin Origin, idle time.Duration) (Session, error) {
+	return s.open(user, origin, idle, "")
 }
 
 // OpenScheduled keeps a job's history separate even when the owner chats between runs.
 func (s *Store) OpenScheduled(user, job string) (Session, error) {
-	return s.open(user, "schedule", job, user, 0, job)
+	return s.open(user, Origin{Channel: "schedule", Chat: job, Sender: user}, 0, job)
 }
 
-func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job string) (Session, error) {
-	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
+func (s *Store) open(user string, origin Origin, idle time.Duration, job string) (Session, error) {
+	if !ValidIdentity(user) || !validOrigin(origin.Channel, origin.Chat, origin.Sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
 	s.mu.Lock()
@@ -392,7 +453,7 @@ func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job
 		idle = DefaultIdle
 	}
 	now := time.Now().UTC()
-	origin := Origin{channel, chat, sender, now}
+	origin.FirstSeen = now
 	list = slices.DeleteFunc(list, func(item Session) bool { return item.ScheduledJob != job })
 	if len(list) == 0 {
 		return s.createSession(user, origin, InboundRef{}, job)
@@ -404,16 +465,25 @@ func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job
 	if job == "" && now.Sub(session.Updated) > idle {
 		return s.create(user, origin, InboundRef{})
 	}
-	for _, o := range session.Origins {
-		if o.Channel == channel && o.Chat == chat && o.Sender == sender {
-			return session, nil
-		}
+	if !session.recordOrigin(origin) {
+		return session, nil
 	}
-	session.Origins = append(session.Origins, origin)
 	if now.After(session.Updated) {
 		session.Updated = now
 	}
 	return session, s.writeJSON(sessionPath(session.ID, "meta.json"), session)
+}
+
+// Keep the first visit time and the most recently observed privacy for this chat.
+func (s *Session) recordOrigin(origin Origin) bool {
+	for i, old := range s.Origins {
+		if old.Channel == origin.Channel && old.Chat == origin.Chat && old.Sender == origin.Sender {
+			s.Origins[i].Private = origin.Private
+			return old.Private != origin.Private
+		}
+	}
+	s.Origins = append(s.Origins, origin)
+	return true
 }
 
 func (s *Store) NewSession(user, channel, chat, sender string) (Session, error) {
@@ -421,14 +491,18 @@ func (s *Store) NewSession(user, channel, chat, sender string) (Session, error) 
 }
 
 func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID string) (Session, error) {
-	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
+	return s.NewSessionAt(user, Origin{Channel: channel, Chat: chat, Sender: sender}, inboundID)
+}
+
+func (s *Store) NewSessionAt(user string, origin Origin, inboundID string) (Session, error) {
+	if !ValidIdentity(user) || !validOrigin(origin.Channel, origin.Chat, origin.Sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ref InboundRef
 	if inboundID != "" {
-		ref = InboundRef{channel, inboundID}
+		ref = InboundRef{origin.Channel, inboundID}
 		list, err := s.list(user, 0)
 		if err != nil {
 			return Session{}, err
@@ -439,7 +513,8 @@ func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID stri
 			}
 		}
 	}
-	return s.create(user, Origin{channel, chat, sender, time.Now().UTC()}, ref)
+	origin.FirstSeen = time.Now().UTC()
+	return s.create(user, origin, ref)
 }
 
 func (s *Store) create(user string, o Origin, ref InboundRef) (Session, error) {
@@ -519,6 +594,11 @@ func (s *Store) Append(id, channel, chat, sender string, msgs ...provider.Messag
 }
 
 func (s *Store) AppendInbound(id, channel, chat, sender, inboundID string, msgs ...provider.Message) error {
+	return s.AppendAt(id, Origin{Channel: channel, Chat: chat, Sender: sender}, inboundID, msgs...)
+}
+
+func (s *Store) AppendAt(id string, origin Origin, inboundID string, msgs ...provider.Message) error {
+	channel, chat, sender := origin.Channel, origin.Chat, origin.Sender
 	if !validOrigin(channel, chat, sender) {
 		return fmt.Errorf("invalid message origin")
 	}
@@ -574,9 +654,8 @@ func (s *Store) AppendInbound(id, channel, chat, sender, inboundID string, msgs 
 	if err == nil {
 		updated := session
 		updated.Updated = now
-		if !slices.ContainsFunc(session.Origins, func(o Origin) bool { return o.Channel == channel && o.Chat == chat && o.Sender == sender }) {
-			updated.Origins = append(session.Origins, Origin{channel, chat, sender, now})
-		}
+		origin.FirstSeen = now
+		updated.recordOrigin(origin)
 		err = s.writeJSON(sessionPath(id, "meta.json"), updated)
 	}
 	if err != nil {

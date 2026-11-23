@@ -82,6 +82,9 @@ response text and tool inputs. A reached budget returns a short message naming
 the budget and skips any pending tool calls. Caller cancellation returns a
 context error.
 Timeout settings use Go duration strings such as `30m` and `1h`.
+During serve, `learning.propose_every` sets the delay between proposal
+reviews (default `1h`, `"0"` disables them). `learning.offer_ttl` sets how
+long chat buttons accept a decision (default `168h`).
 
 ## Later slices
 

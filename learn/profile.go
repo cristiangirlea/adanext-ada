@@ -13,16 +13,20 @@ import (
 
 // The intent bridges the two atomic renames when a process exits between them.
 type intent struct {
-	ID     string    `json:"id"`
-	Action string    `json:"action"`
-	At     time.Time `json:"at"`
+	DecisionInbound string    `json:"decision_inbound,omitempty"`
+	ID              string    `json:"id"`
+	Action          string    `json:"action"`
+	At              time.Time `json:"at"`
 }
 
 func source(p *Proposal) string         { return "learn:" + p.ID + " session:" + p.Session }
 func (tx *transaction) journal() string { return ".intent-" + tx.name }
 
 func (tx *transaction) changeProfile(p *Proposal, action string, now time.Time) error {
-	op := intent{p.ID, action, now}
+	op := intent{ID: p.ID, Action: action, At: now}
+	if action == "keep" {
+		op.DecisionInbound = p.DecisionInbound
+	}
 	if err := memory.WriteJSON(tx.root, tx.journal(), op); err != nil {
 		return err
 	}
@@ -43,6 +47,9 @@ func (tx *transaction) changeProfile(p *Proposal, action string, now time.Time) 
 }
 
 func (tx *transaction) finish(p *Proposal, op intent) error {
+	if op.DecisionInbound != "" {
+		p.DecisionInbound = op.DecisionInbound
+	}
 	p.Status, p.Decided = transitions[op.Action].to, op.At
 	if p.Status == "kept" {
 		p.Confirmed = op.At
@@ -61,7 +68,7 @@ func (tx *transaction) recover() error {
 	if err != nil {
 		return err
 	}
-	if _, err := object(data, "id", "action", "at"); err != nil {
+	if _, err := objectWithOptional(data, []string{"decision_inbound"}, "id", "action", "at"); err != nil {
 		return err
 	}
 	var op intent
@@ -71,6 +78,9 @@ func (tx *transaction) recover() error {
 	p, err := tx.find(op.ID)
 	if err != nil {
 		return err
+	}
+	if op.DecisionInbound != "" && (!memory.ValidIdentity(op.DecisionInbound) || op.Action != "keep" || p.Offer == nil || !op.At.Before(p.Offer.Expires)) {
+		return fmt.Errorf("learning intent conflicts with offer")
 	}
 	switch op.Action {
 	case "keep", "restore", "archive", "rollback":
