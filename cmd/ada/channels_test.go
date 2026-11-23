@@ -581,6 +581,9 @@ func TestAllowRevokedOnNextServe(t *testing.T) {
 	if _, err := f.cli("pair", code); err != nil {
 		t.Fatal(err)
 	}
+	// An ignored group message's ack proves the delivered frame was read before shutdown.
+	f.inbound("sync", "stranger", "ignored", true)
+	f.ack("sync")
 	f.shutdown()
 	// A manual link that is temporarily also listed must remain a manual link.
 	f.configure(map[string]any{"name": "echo", "allow": []string{"paired", "allowed"}})
