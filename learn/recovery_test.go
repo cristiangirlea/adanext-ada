@@ -146,7 +146,7 @@ func TestConcurrentReviewsAndKeeps(t *testing.T) {
 	a, b := <-done, <-done
 	items := slices.Concat(a.items, b.items)
 	if a.err != nil || b.err != nil || a.calls+b.calls != 1 || len(items) != 1 {
-		t.Fatal(a, b)
+		t.Fatal(a, b, a.err, b.err)
 	}
 	errs := make(chan error, 2)
 	for _, s := range []Store{f.Store, {Memory: second}} {
