@@ -138,12 +138,36 @@ type userKey struct{}
 func (s *Store) WithScheduleFiles(fn func(*os.Root) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.root.MkdirAll("schedule", 0700); err != nil {
-		return fmt.Errorf("create schedule directory: %w", err)
+	return s.withFiles("schedule", filepath.Join("schedule", "schedule.lock"), fn)
+}
+
+// Learning transactions may acquire profile.lock while holding learning.lock.
+func (s *Store) WithLearningFiles(fn func(*os.Root) error) error {
+	return s.withFiles("learning", "learning.lock", fn)
+}
+
+// A separate review slot prevents duplicate model calls without blocking an owner's decisions.
+func (s *Store) WithLearningReview(fn func() error) error {
+	return s.withFileLock("learning-review.lock", fn)
+}
+
+func (s *Store) withFiles(dir, lockPath string, fn func(*os.Root) error) error {
+	if err := s.root.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create %s directory: %w", dir, err)
 	}
-	lockPath := filepath.Join("schedule", "schedule.lock")
+	return s.withFileLock(lockPath, func() error {
+		root, err := s.root.OpenRoot(dir)
+		if err != nil {
+			return fmt.Errorf("open %s directory: %w", dir, err)
+		}
+		defer root.Close()
+		return fn(root)
+	})
+}
+
+func (s *Store) withFileLock(lockPath string, fn func() error) error {
 	file, err := s.lockFile(lockPath)
-	// A concurrent CLI edit should not cost a completed job its run record.
+	// Brief concurrent CLI edits should finish before the next writer gives up.
 	for deadline := time.Now().Add(5 * time.Second); errors.Is(err, errDirectoryBusy) && time.Now().Before(deadline); {
 		time.Sleep(10 * time.Millisecond)
 		file, err = s.lockFile(lockPath)
@@ -152,12 +176,7 @@ func (s *Store) WithScheduleFiles(fn func(*os.Root) error) error {
 		return err
 	}
 	defer releaseLock(file)
-	root, err := s.root.OpenRoot("schedule")
-	if err != nil {
-		return fmt.Errorf("open schedule directory: %w", err)
-	}
-	defer root.Close()
-	return fn(root)
+	return fn()
 }
 
 func WithUser(ctx context.Context, user string) context.Context {
@@ -649,6 +668,29 @@ func (s *Store) FirstUserLine(id string) (string, error) {
 		return !ok
 	})
 	return line, err
+}
+
+// VisitMessages preserves committed log indices and checks ownership before disclosing content.
+func (s *Store) VisitMessages(user, id string, visit func(int, provider.Message, bool)) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.get(id)
+	if err != nil {
+		return Session{}, err
+	}
+	if session.User != user {
+		return Session{}, fmt.Errorf("session does not belong to the user")
+	}
+	links, err := s.links()
+	if err != nil {
+		return Session{}, err
+	}
+	err = s.visit(session, func(i int, r record) bool {
+		linked := ValidIdentity(r.Channel) && ValidIdentity(r.Sender) && links[r.Channel+"\x00"+r.Sender] == user
+		visit(i, r.Message, linked)
+		return true
+	})
+	return session, err
 }
 
 func (s *Store) History(id string, maxMessages int) ([]provider.Message, error) {

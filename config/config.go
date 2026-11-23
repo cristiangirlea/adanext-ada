@@ -28,6 +28,7 @@ type KnowledgeSettings struct {
 }
 
 type Settings struct {
+	Learning        LearningSettings   `json:"-"`
 	Channels        []channel.Settings `json:"channels"`
 	ApprovalTimeout time.Duration      `json:"-"`
 	DataDir         string             `json:"data_dir"`
@@ -45,6 +46,11 @@ type Settings struct {
 	MCPServers      []tool.MCPConfig   `json:"mcp_servers"`
 }
 
+type LearningSettings struct {
+	StaleAfter   time.Duration
+	ArchiveAfter time.Duration
+}
+
 type HRNSettings struct {
 	Home    string
 	Path    string
@@ -54,6 +60,10 @@ type HRNSettings struct {
 }
 
 type fileSettings struct {
+	Learning struct {
+		StaleAfter   string `json:"stale_after"`
+		ArchiveAfter string `json:"archive_after"`
+	} `json:"learning"`
 	Approvals struct {
 		Timeout string `json:"timeout"`
 	} `json:"approvals"`
@@ -104,6 +114,14 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	s.Learning.StaleAfter, err = parseTimeout("learning.stale_after", data.Learning.StaleAfter)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.Learning.ArchiveAfter, err = parseTimeout("learning.archive_after", data.Learning.ArchiveAfter)
+	if err != nil {
+		return Settings{}, err
+	}
 	s.ApprovalTimeout, err = parseTimeout("approvals.timeout", data.Approvals.Timeout)
 	if err != nil {
 		return Settings{}, err
@@ -192,6 +210,12 @@ func (s Settings) validate() error {
 }
 
 func (s *Settings) setDefaults() error {
+	if s.Learning.StaleAfter == 0 {
+		s.Learning.StaleAfter = 2160 * time.Hour
+	}
+	if s.Learning.ArchiveAfter == 0 {
+		s.Learning.ArchiveAfter = 720 * time.Hour
+	}
 	if s.ApprovalTimeout == 0 {
 		s.ApprovalTimeout = approval.DefaultTimeout
 	}
@@ -251,6 +275,17 @@ func Build(s Settings, getenv func(string) string) (*App, error) {
 	return build(s, getenv, 30*time.Second)
 }
 
+// BuildProvider applies chat's endpoint policy without starting any tools.
+func (s Settings) BuildProvider(getenv func(string) string) (provider.Provider, string, error) {
+	for _, cfg := range s.Providers {
+		if cfg.Name == s.ChatProvider {
+			model, err := provider.New(cfg, s.AllowMetered, getenv)
+			return model, cfg.Model, err
+		}
+	}
+	return nil, "", fmt.Errorf("chat_provider %q is not configured", s.ChatProvider)
+}
+
 func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Duration) (*App, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -258,18 +293,7 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 	if err := s.setDefaults(); err != nil {
 		return nil, err
 	}
-	var selected *provider.Config
-	for _, cfg := range s.Providers {
-		if cfg.Name != s.ChatProvider {
-			continue
-		}
-		selected = &cfg
-		break
-	}
-	if selected == nil {
-		return nil, fmt.Errorf("chat_provider %q is not configured", s.ChatProvider)
-	}
-	model, err := provider.New(*selected, s.AllowMetered, getenv)
+	model, modelName, err := s.BuildProvider(getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -324,5 +348,5 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 		}
 		return store.Render(user)
 	}
-	return &App{Loop: &loop.Loop{Provider: model, Tools: registry, Model: selected.Model, Budget: s.Budget, Context: profile}, Store: store}, nil
+	return &App{Loop: &loop.Loop{Provider: model, Tools: registry, Model: modelName, Budget: s.Budget, Context: profile}, Store: store}, nil
 }
