@@ -16,7 +16,13 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cristiangirlea/adanext-ada/internal/proctree"
 )
+
+func setProcessAttributes(cmd *exec.Cmd) { proctree.Configure(cmd) }
+
+func manageProcessTree(cmd *exec.Cmd) (kill, close func(), err error) { return proctree.Manage(cmd) }
 
 const (
 	lineLimit   = 5 << 20

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/cristiangirlea/adanext-ada/provider"
@@ -81,7 +80,8 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 		if err != nil {
 			return "", history, fmt.Errorf("complete conversation: %w", err)
 		}
-		history = append(history, provider.Message{Role: "assistant", Content: res.Content})
+		assistant := provider.Message{Role: "assistant", Content: res.Content}
+		history = append(history, assistant)
 		if res.Usage == (provider.Usage{}) {
 			remaining -= min(remaining, provider.EstimateTokens(req, res))
 		} else {
@@ -93,13 +93,9 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 		if remaining == 0 {
 			stop = fmt.Sprintf("Stopped: the token budget (%d) was reached.", budget.MaxTokens)
 		}
-		var texts []string
 		var results []provider.Block
 		for _, block := range res.Content {
-			switch block.Type {
-			case "text":
-				texts = append(texts, block.Text)
-			case "tool_use":
+			if block.Type == "tool_use" {
 				result := provider.Block{Type: "tool_result", ToolUseID: block.ID}
 				if stop != "" {
 					result.Text, result.IsError = stop, true
@@ -124,7 +120,7 @@ func (l *Loop) Turn(ctx context.Context, history []provider.Message, user string
 			return budgetStop(stop, history)
 		}
 		if len(results) == 0 {
-			return strings.Join(texts, "\n"), history, nil
+			return assistant.Text(), history, nil
 		}
 	}
 	return budgetStop(fmt.Sprintf("Stopped: the iteration budget (%d) was reached.", budget.MaxIterations), history)

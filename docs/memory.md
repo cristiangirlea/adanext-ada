@@ -10,11 +10,11 @@ temporary file in the same directory and renamed into place.
 
 `identities.json` maps each channel and sender to a user. The CLI links itself
 to `owner` (default user ID `owner`). Other channels obtain identity links
-through pairing in the channels slice. Two linked senders for one user can
+through [pairing or per-channel settings](channels.md). Two linked senders for one user can
 continue the same conversation across channels.
 
-One `ada chat` per data directory holds the exclusive `sessions.lock` until it
-exits. A second chat reports that the directory is in use. `ada sessions` and
+One `ada chat` or `ada serve` per data directory holds the exclusive `sessions.lock` until it
+exits. A second writer reports that the directory is in use. `ada sessions` and
 `ada search` can read the same directory while a chat is running.
 
 `ada chat` prints the session ID to stderr and continues the user's most

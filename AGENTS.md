@@ -13,6 +13,8 @@ with the first slice; until then the issues are the design.
 | Path | Holds |
 |---|---|
 | `doc.go` | The package comment. Packages arrive with their slices. |
+| `channel/` | Channel plugin supervision, conversation delivery, approvals and journals. |
+| `internal/proctree/` | Platform-specific process tree management for plugins. |
 | `.claude/hooks/` | gofmt, push and hidden-character checks; their tests run in CI. |
 | `.github/workflows/ci.yml` | CI on GitHub's hosted Ubuntu, Windows and macOS runners (public repository). |
 
@@ -37,8 +39,8 @@ maintainer's machines.
 
 ## Rules of this repository
 
-- **Standard library first.** A dependency is argued in its PR; this module decides who may talk
-  to Ada and what she may do, so every dependency is trusted with that.
+- **Standard library plus harness contracts only.** `github.com/cristiangirlea/harness/contracts`
+  shares the channel wire types and strict parsers with plugins and itself uses only the standard library.
 - **Plan and local by default.** No code path sends a request to a metered API unless the user
   enabled it in Ada's settings; a refusal names the setting, never a key.
 - **Ask before effects.** Writes, commands and outgoing messages wait for the user's approval.

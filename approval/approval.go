@@ -94,6 +94,10 @@ func Decide(ctx context.Context, r Request) (Decision, error) {
 	case <-ask.Done():
 	}
 	d := answer.d
+	// The deadline can win before the surface returns its decision.
+	if named, ok := a.(interface{ SurfaceName() string }); ok && d.By == "" {
+		d.By = named.SurfaceName()
+	}
 	now := time.Now().UTC()
 	d.At = now
 	switch {

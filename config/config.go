@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/cristiangirlea/adanext-ada/approval"
+	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
@@ -27,6 +28,7 @@ type KnowledgeSettings struct {
 }
 
 type Settings struct {
+	Channels        []channel.Settings `json:"channels"`
 	ApprovalTimeout time.Duration      `json:"-"`
 	DataDir         string             `json:"data_dir"`
 	Owner           string             `json:"owner"`
@@ -171,6 +173,16 @@ func (s Settings) validate() error {
 		}
 		names[cfg.Name] = struct{}{}
 	}
+	channelNames := map[string]bool{}
+	for _, ch := range s.Channels {
+		if err := ch.Validate(); err != nil {
+			return err
+		}
+		if channelNames[ch.Name] {
+			return fmt.Errorf("duplicate channel %q", ch.Name)
+		}
+		channelNames[ch.Name] = true
+	}
 	for _, server := range s.MCPServers {
 		if err := server.Validate(); err != nil {
 			return err
@@ -219,6 +231,17 @@ func (s Settings) RunsDir(getenv func(string) string) string {
 	return memory.HRNRunsDir(getenv)
 }
 
+// ProviderKeyEnv names variables that child processes must never inherit.
+func (s Settings) ProviderKeyEnv() []string {
+	var names []string
+	for _, cfg := range s.Providers {
+		if cfg.APIKeyEnv != "" {
+			names = append(names, cfg.APIKeyEnv)
+		}
+	}
+	return names
+}
+
 type App struct {
 	*loop.Loop
 	Store *memory.Store
@@ -260,13 +283,7 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 			return nil, err
 		}
 	}
-	var withoutEnv []string
-	for _, cfg := range s.Providers {
-		if cfg.APIKeyEnv != "" {
-			withoutEnv = append(withoutEnv, cfg.APIKeyEnv)
-		}
-	}
-	opts := hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: withoutEnv}
+	opts := hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
 	if k := s.Knowledge; k != nil {
 		req := hrnexec.KnowledgeRequest{TenantID: k.TenantID, ProjectID: k.ProjectID, Backend: k.Backend, Model: k.Model, Revision: k.Revision}
 		if err := registry.Add(tool.SearchKnowledge{Options: opts, Request: req}); err != nil {

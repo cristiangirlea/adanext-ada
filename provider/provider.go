@@ -3,11 +3,23 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 type Message struct {
 	Role    string
 	Content []Block
+}
+
+// Text joins the text blocks as they appear in a conversation answer.
+func (m Message) Text() string {
+	var parts []string
+	for _, block := range m.Content {
+		if block.Type == "text" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 type Block struct {
