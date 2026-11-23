@@ -95,6 +95,11 @@ func (s *Store) Close() error {
 
 func (s *Store) lockFile(name string) (*os.File, error) {
 	file, err := s.root.OpenFile(name, os.O_CREATE|os.O_RDWR, 0600)
+	// macOS can report a create-open as missing while another opener is creating the same file.
+	for attempt := 1; errors.Is(err, fs.ErrNotExist) && attempt < 5; attempt++ {
+		time.Sleep(time.Duration(attempt) * 5 * time.Millisecond)
+		file, err = s.root.OpenFile(name, os.O_CREATE|os.O_RDWR, 0600)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", name, err)
 	}
