@@ -37,7 +37,7 @@ func (s Store) BindOffer(user, id string, offer Offer) (bool, error) {
 		if err != nil {
 			return err
 		}
-		if p.Status != "pending" || !time.Now().Before(offer.Expires) {
+		if p.Kind != "fact" || p.Status != "pending" || !time.Now().Before(offer.Expires) {
 			return nil
 		}
 		if current, ok := s.Memory.Resolve(offer.Channel, offer.Sender); !ok || current != user {

@@ -13,19 +13,14 @@ import (
 	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
+	"github.com/cristiangirlea/adanext-ada/learn"
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
 
-type KnowledgeSettings struct {
-	TenantID  string `json:"tenant_id"`
-	ProjectID string `json:"project_id"`
-	Backend   string `json:"backend"`
-	Model     string `json:"model"`
-	Revision  string `json:"revision"`
-}
+type KnowledgeSettings = hrnexec.KnowledgeScope
 
 type Settings struct {
 	Learning        LearningSettings   `json:"-"`
@@ -47,10 +42,11 @@ type Settings struct {
 }
 
 type LearningSettings struct {
-	ProposeEvery time.Duration
-	OfferTTL     time.Duration
-	StaleAfter   time.Duration
-	ArchiveAfter time.Duration
+	KnowledgeBackend *string
+	ProposeEvery     time.Duration
+	OfferTTL         time.Duration
+	StaleAfter       time.Duration
+	ArchiveAfter     time.Duration
 }
 
 type HRNSettings struct {
@@ -63,10 +59,11 @@ type HRNSettings struct {
 
 type fileSettings struct {
 	Learning struct {
-		ProposeEvery json.RawMessage `json:"propose_every"`
-		OfferTTL     string          `json:"offer_ttl"`
-		StaleAfter   string          `json:"stale_after"`
-		ArchiveAfter string          `json:"archive_after"`
+		KnowledgeBackend json.RawMessage `json:"knowledge_backend"`
+		ProposeEvery     json.RawMessage `json:"propose_every"`
+		OfferTTL         string          `json:"offer_ttl"`
+		StaleAfter       string          `json:"stale_after"`
+		ArchiveAfter     string          `json:"archive_after"`
 	} `json:"learning"`
 	Approvals struct {
 		Timeout string `json:"timeout"`
@@ -118,6 +115,14 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	// Only an omitted backend inherits the delegate setting.
+	if raw := data.Learning.KnowledgeBackend; raw != nil {
+		var backend string
+		if err := json.Unmarshal(raw, &backend); err != nil {
+			return Settings{}, fmt.Errorf("parse learning.knowledge_backend: %w", err)
+		}
+		s.Learning.KnowledgeBackend = &backend
+	}
 	every := "1h"
 	if string(data.Learning.ProposeEvery) == "0" {
 		every = "0"
@@ -292,6 +297,24 @@ func (s Settings) ProviderKeyEnv() []string {
 	return names
 }
 
+func (s Settings) hrnOptions() hrnexec.Options {
+	return hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
+}
+
+func (s Settings) KnowledgeReview() learn.KnowledgeReview {
+	backend := s.HRN.Backend
+	if s.Learning.KnowledgeBackend != nil {
+		backend = *s.Learning.KnowledgeBackend
+	}
+	opts := s.hrnOptions()
+	opts.WithoutEnv = append(opts.WithoutEnv, "HRN_OPERATOR_TOKEN")
+	k := learn.KnowledgeReview{Options: opts, Backend: backend, Timeout: s.HRN.Timeout}
+	if s.Knowledge != nil {
+		k.Scope = *s.Knowledge
+	}
+	return k
+}
+
 type App struct {
 	*loop.Loop
 	Store *memory.Store
@@ -333,18 +356,10 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 			return nil, err
 		}
 	}
-	opts := hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
+	opts := s.hrnOptions()
 	if k := s.Knowledge; k != nil {
 		req := hrnexec.KnowledgeRequest{TenantID: k.TenantID, ProjectID: k.ProjectID, Backend: k.Backend, Model: k.Model, Revision: k.Revision}
 		if err := registry.Add(tool.SearchKnowledge{Options: opts, Request: req}); err != nil {
-			return nil, err
-		}
-	}
-	if len(s.WorkspaceRoots) > 0 {
-		if err := registry.Add(tool.Delegate{
-			Roots: s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
-			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
-		}); err != nil {
 			return nil, err
 		}
 	}
@@ -361,6 +376,17 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 	if err != nil {
 		registry.Close()
 		return nil, err
+	}
+	if len(s.WorkspaceRoots) > 0 {
+		if err := registry.Add(tool.Delegate{
+			RecordDelegation: (learn.Store{Memory: store}).RecordDelegation,
+			Roots:            s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
+			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
+		}); err != nil {
+			store.Close()
+			registry.Close()
+			return nil, err
+		}
 	}
 	if err := registry.Add(tool.SearchMemory{Store: store, HRNRuns: s.RunsDir(getenv)}); err != nil {
 		store.Close()

@@ -75,3 +75,5 @@ Memory stays on the machine except for content sent in configured model
 requests and hrn's own calls. Each CLI subcommand accepts `-config FILE`
 before its positional arguments.
 
+The same scope is used to [propose and review project knowledge](learning.md#project-knowledge-from-delegated-runs) from successful delegated runs.
+

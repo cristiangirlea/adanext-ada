@@ -21,6 +21,7 @@ import (
 )
 
 type Service struct {
+	Knowledge    learn.KnowledgeReview
 	ProposeEvery time.Duration
 	OfferTTL     time.Duration
 	Decision     func(user string, press learn.ButtonPress) (bool, error)

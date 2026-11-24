@@ -16,6 +16,12 @@ import (
 
 func printProposals(out io.Writer, items []learn.Proposal) error {
 	for _, p := range items {
+		if p.Kind == "knowledge" {
+			if _, err := fmt.Fprintf(out, "%s\t%s\tknowledge\tdraft=%s\t%s\n", p.ID, p.Status, p.Draft, terminalField(p.Text)); err != nil {
+				return err
+			}
+			continue
+		}
 		if _, err := fmt.Fprintf(out, "%s\t%s\tsession=%s\tmessages=%v\toutside=%t\t%s\n", p.ID, p.Status, p.Session, p.Messages, p.Outside, terminalField(p.Text)); err != nil {
 			return err
 		}
@@ -23,8 +29,8 @@ func printProposals(out io.Writer, items []learn.Proposal) error {
 	return nil
 }
 
-func learnCommand(ctx context.Context, args []string, path string, out io.Writer) error {
-	const usage = "usage: ada learn propose [-session ID] [-since DURATION] | list [-all] | keep ID [-outside] | reject ID | rollback ID | confirm ID | restore ID"
+func learnCommand(ctx context.Context, args []string, path string, out, diagnostics io.Writer) error {
+	const usage = "usage: ada learn propose [-session ID] [-since DURATION] | list [-all] | keep ID [-outside] [-version VERSION_ID] | reject ID | rollback ID | confirm ID | restore ID"
 	if len(args) == 0 {
 		return errors.New(usage)
 	}
@@ -32,7 +38,7 @@ func learnCommand(ctx context.Context, args []string, path string, out io.Writer
 	flags := flag.NewFlagSet("learn "+command, flag.ContinueOnError)
 	flags.SetOutput(out)
 	flags.StringVar(&path, "config", path, "settings file")
-	var session, id string
+	var session, id, version string
 	var since time.Duration
 	var outside, all bool
 	switch command {
@@ -48,6 +54,7 @@ func learnCommand(ctx context.Context, args []string, path string, out io.Writer
 	case "list":
 		flags.BoolVar(&all, "all", false, "include decided proposals")
 	case "keep":
+		flags.StringVar(&version, "version", "", "admitted hrn knowledge version")
 		flags.BoolVar(&outside, "outside", false, "approve outside content")
 	case "reject", "confirm", "restore", "rollback":
 	default:
@@ -91,24 +98,42 @@ func learnCommand(ctx context.Context, args []string, path string, out io.Writer
 	case "list":
 		items, err = store.List(user, all)
 	case "propose":
-		model, _, buildErr := settings.BuildProvider(os.Getenv)
-		if buildErr != nil {
-			return buildErr
+		items, err = proposeFacts(ctx, settings, store, session, now, since)
+		review := settings.KnowledgeReview().WithDiagnostics(func(message string) { fmt.Fprintln(diagnostics, message) })
+		review.SkipBackoff = true
+		project, knowledgeErr := learn.ProposeKnowledge(ctx, store, user, review)
+		if errors.Is(knowledgeErr, learn.ErrKnowledgeDisabled) {
+			_, knowledgeErr = fmt.Fprintln(diagnostics, knowledgeErr)
 		}
-		ctx, cancel := context.WithTimeout(ctx, settings.Budget.Timeout)
-		defer cancel()
-		if session != "" {
-			items, err = learn.Propose(ctx, model, store, user, session)
-		} else {
-			items, err = store.ProposeRecent(ctx, model, user, now, settings.SessionIdle, since)
-		}
+		items = append(items, project...)
+		err = errors.Join(err, knowledgeErr)
 	default:
 		var item learn.Proposal
-		item, err = store.Decide(user, id, command, outside, time.Now().UTC())
+		if version != "" {
+			item, err = store.KeepKnowledge(ctx, user, id, version, settings.KnowledgeReview())
+		} else {
+			item, err = store.Decide(user, id, command, outside, time.Now().UTC())
+		}
+		if err == nil && command == "rollback" && item.Kind == "knowledge" {
+			_, err = fmt.Fprintf(out, "Maintainer: run hrn knowledge rollback request.json to roll back the active project knowledge in hrn (proposal version %s).\n", terminalField(item.Version))
+		}
 		if err != nil {
 			return err
 		}
 		items = []learn.Proposal{item}
 	}
 	return errors.Join(err, printProposals(out, items))
+}
+
+func proposeFacts(ctx context.Context, settings config.Settings, store learn.Store, session string, now time.Time, since time.Duration) ([]learn.Proposal, error) {
+	model, _, err := settings.BuildProvider(os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	review, cancel := context.WithTimeout(ctx, settings.Budget.Timeout)
+	defer cancel()
+	if session != "" {
+		return learn.Propose(review, model, store, settings.Owner, session)
+	}
+	return store.ProposeRecent(review, model, settings.Owner, now, settings.SessionIdle, since)
 }

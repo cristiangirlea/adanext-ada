@@ -238,6 +238,9 @@ func (tx *transaction) record(id string, e evidence, candidates []candidate) ([]
 		seen = append(seen, strings.Join(strings.Fields(f.Text), " "))
 	}
 	for _, p := range tx.Proposals {
+		if p.Kind != "fact" {
+			continue
+		}
 		switch p.Status {
 		case "pending", "kept", "rejected", "rolled_back":
 			seen = append(seen, strings.Join(strings.Fields(p.Text), " "))

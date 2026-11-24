@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,7 +46,7 @@ func TestLearnCommands(t *testing.T) {
 	invoke := func(args ...string) (string, error) {
 		var out bytes.Buffer
 		args = append([]string{"learn", args[0], "-config", cfg}, args[1:]...)
-		err := run(t.Context(), args, strings.NewReader(""), &out, &out)
+		err := run(t.Context(), args, strings.NewReader(""), &out, io.Discard)
 		return strings.TrimSpace(out.String()), err
 	}
 	writeConfig("https://remote.invalid", "1ns")

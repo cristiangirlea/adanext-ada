@@ -86,10 +86,26 @@ During serve, `learning.propose_every` sets the delay between proposal
 reviews (default `1h`, `"0"` disables them). `learning.offer_ttl` sets how
 long chat buttons accept a decision (default `168h`).
 
+For project-knowledge proposals, configure the corpus and the review backend.
+A settings file can include the following fields.
+
+```json
+{
+  "knowledge": {"tenant_id":"team","project_id":"project","backend":"local","model":"model","revision":"main"},
+  "learning": {"knowledge_backend":"codex"}
+}
+```
+
+`learning.knowledge_backend` accepts `claude` or `codex` and defaults to
+`hrn.backend` when omitted. An empty value or any other backend disables
+knowledge review. Ada uses `hrn.path`, `hrn.home`, `hrn.timeout` (default
+`30m`) and the tenant environment used for knowledge search. The maintainer
+runs import, admission and rollback. See [Learning proposals](learning.md).
+
 ## Later slices
 
 [Channels](channels.md) describes the plugin host and pairing.
 [Scheduled jobs](schedule.md) run prompts or scripts during serve and deliver results to their configured chat.
-[Learning](learning.md) proposes profile facts for the owner's approval and supports rollback and staleness.
+[Learning](learning.md) proposes profile facts and reviews delegated runs for project knowledge.
 Isolation (#8) adds stronger execution
 boundaries.
