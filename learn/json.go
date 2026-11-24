@@ -11,6 +11,10 @@ import (
 
 // The standard decoder otherwise accepts duplicate keys, case variants and null scalars.
 func object(data []byte, keys ...string) (map[string]json.RawMessage, error) {
+	return objectWithOptional(data, nil, keys...)
+}
+
+func objectWithOptional(data []byte, optional []string, keys ...string) (map[string]json.RawMessage, error) {
 	if !utf8.Valid(data) {
 		return nil, fmt.Errorf("invalid UTF-8 in JSON")
 	}
@@ -25,7 +29,7 @@ func object(data []byte, keys ...string) (map[string]json.RawMessage, error) {
 			return nil, err
 		}
 		key, ok := tok.(string)
-		if !ok || (keys != nil && !slices.Contains(keys, key)) {
+		if !ok || (keys != nil && !slices.Contains(optional, key) && !slices.Contains(keys, key)) {
 			return nil, fmt.Errorf("unexpected JSON field %q", key)
 		}
 		if _, exists := fields[key]; exists {

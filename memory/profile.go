@@ -26,6 +26,15 @@ type profile struct {
 	Facts []Fact `json:"facts"`
 }
 
+// FactRefusal separates a safe chat reply from the underlying diagnostic.
+type FactRefusal struct {
+	Reason string
+	cause  error
+}
+
+func (e *FactRefusal) Error() string { return e.cause.Error() }
+func (e *FactRefusal) Unwrap() error { return e.cause }
+
 var plainProfileID = regexp.MustCompile(`^[a-z0-9_-]+$`)
 var deviceName = regexp.MustCompile(`^(con|prn|aux|nul|com[1-9]|lpt[1-9])$`)
 
@@ -96,24 +105,24 @@ func (s *Store) AddFact(user, text, source string) (Fact, error) {
 	defer s.mu.Unlock()
 	path, err := profilePath(user)
 	if err != nil {
-		return Fact{}, err
+		return Fact{}, &FactRefusal{"the profile is unavailable", err}
 	}
 	file, err := s.lockFile("profile.lock")
 	if err != nil {
-		return Fact{}, err
+		return Fact{}, &FactRefusal{"the profile is unavailable", err}
 	}
 	defer releaseLock(file)
 	p, err := s.profile(path)
 	if err != nil {
-		return Fact{}, err
+		return Fact{}, &FactRefusal{"the profile is unavailable", err}
 	}
 	f := Fact{rand.Text(), text, source, time.Now().UTC()}
 	p.Facts = append(p.Facts, f)
 	if err := p.validate(); err != nil {
-		return Fact{}, err
+		return Fact{}, &FactRefusal{err.Error(), err}
 	}
 	if err := s.writeJSON(path, p); err != nil {
-		return Fact{}, err
+		return Fact{}, &FactRefusal{"the profile is unavailable", err}
 	}
 	return f, nil
 }

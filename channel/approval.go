@@ -36,11 +36,7 @@ func (a *ChannelApprover) Ask(ctx context.Context, r approval.Request) (approval
 	h.prompts[id] = wait
 	h.mu.Unlock()
 	defer func() { h.mu.Lock(); delete(h.prompts, id); h.mu.Unlock() }()
-	summary := cleanText(r.Summary)
-	const marker = " [truncated]"
-	if len(summary) > p.MaxEventText {
-		summary = prefixBytes(summary, p.MaxEventText-len(marker)) + marker
-	}
+	summary := promptText(r.Summary)
 	delivery := p.Deliver{Type: p.TypeDeliver, ID: id, ChatID: wait.chat, ReplyTo: &a.in.ID, Text: summary, Buttons: []p.Button{{ID: "approve", Label: "Approve"}, {ID: "deny", Label: "Deny"}}}
 	err := h.ledger.record(outRecord{Deliver: &delivery})
 	if err != nil {
@@ -51,6 +47,14 @@ func (a *ChannelApprover) Ask(ctx context.Context, r approval.Request) (approval
 	case <-ctx.Done():
 	}
 	return d, nil
+}
+func promptText(text string) string {
+	const marker = " [truncated]"
+	text = cleanText(text)
+	if len(text) > p.MaxEventText {
+		return prefixBytes(text, p.MaxEventText-len(marker)) + marker
+	}
+	return text
 }
 func (w prompt) matches(in *p.Inbound, user string) bool {
 	return w.user == user && w.chat == in.Chat.ID && w.sender == in.Sender.ID && time.Now().Before(w.expires)
@@ -65,14 +69,17 @@ func (h *Host) awaiting(in *p.Inbound, user string) bool {
 	}
 	return false
 }
-func (h *Host) action(in *p.Inbound, user string) {
+func (h *Host) action(in *p.Inbound, user string, replay bool) error {
 	a := in.Action
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	w, ok := h.prompts[a.DeliveryID]
-	if !ok || !w.matches(in, user) || (a.ButtonID != "approve" && a.ButtonID != "deny") {
-		return
+	if ok && w.matches(in, user) && (a.ButtonID == "approve" || a.ButtonID == "deny") {
+		delete(h.prompts, a.DeliveryID)
+		w.decision <- a.ButtonID == "approve"
 	}
-	delete(h.prompts, a.DeliveryID)
-	w.decision <- a.ButtonID == "approve"
+	h.mu.Unlock()
+	if ok || h.service.Decision == nil {
+		return nil
+	}
+	return h.decideOffer(in, user, replay)
 }

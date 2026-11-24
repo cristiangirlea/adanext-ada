@@ -21,6 +21,7 @@ import (
 	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/config"
+	"github.com/cristiangirlea/adanext-ada/learn"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/schedule"
 	"github.com/cristiangirlea/adanext-ada/tool"
@@ -175,7 +176,9 @@ func newServeService(settings config.Settings, conversation *config.App, diagnos
 	service := channel.Service{
 		Store: conversation.Store, Loop: conversation.Loop, Owner: settings.Owner,
 		Idle: settings.SessionIdle, History: settings.HistoryMessages,
-		WithoutEnv: settings.ProviderKeyEnv(),
+		WithoutEnv:   settings.ProviderKeyEnv(),
+		ProposeEvery: settings.Learning.ProposeEvery, OfferTTL: settings.Learning.OfferTTL,
+		Decision: (learn.Store{Memory: conversation.Store}).DecideOffer,
 		Status: func(line string) {
 			statusMu.Lock()
 			defer statusMu.Unlock()

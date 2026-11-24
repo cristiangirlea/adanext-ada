@@ -59,6 +59,16 @@ buttons. Only the original sender in the same channel and chat can answer that
 prompt. Typed text cannot grant approval. The deadline is `approvals.timeout`.
 `ada approvals` shows the decision and the channel that made it.
 
+When groups are disabled, Ada can offer [learning proposals](learning.md)
+in the session's most recent chat if its origin was recorded as private and
+the sender is still linked to the same user. Older origins without a chat
+type and group chats leave proposals for the CLI. While a plugin reconnects,
+Ada queues eligible offers in its outbox and rechecks them before delivery.
+The **Keep** (or **Keep anyway**) and **Forget it** buttons survive a serve
+restart until the offer expires or the proposal is decided. If the profile
+refuses a keep, Ada replies in that chat with a short reason and leaves the
+proposal pending.
+
 ## Delivery and recovery
 
 Under `data_dir/channels/<name>/`, Ada syncs each inbound to `inbox.jsonl`

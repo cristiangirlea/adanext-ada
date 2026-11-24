@@ -16,17 +16,19 @@ import (
 type Store struct{ Memory *memory.Store }
 
 type Proposal struct {
-	ID        string    `json:"id"`
-	Kind      string    `json:"kind"`
-	Text      string    `json:"text"`
-	Session   string    `json:"session"`
-	Messages  []int     `json:"messages"`
-	Outside   bool      `json:"outside"`
-	Status    string    `json:"status"`
-	Created   time.Time `json:"created"`
-	Decided   time.Time `json:"decided"`
-	FactID    string    `json:"fact_id"`
-	Confirmed time.Time `json:"confirmed"`
+	Offer           *Offer    `json:"offer,omitempty"`
+	DecisionInbound string    `json:"decision_inbound,omitempty"`
+	ID              string    `json:"id"`
+	Kind            string    `json:"kind"`
+	Text            string    `json:"text"`
+	Session         string    `json:"session"`
+	Messages        []int     `json:"messages"`
+	Outside         bool      `json:"outside"`
+	Status          string    `json:"status"`
+	Created         time.Time `json:"created"`
+	Decided         time.Time `json:"decided"`
+	FactID          string    `json:"fact_id"`
+	Confirmed       time.Time `json:"confirmed"`
 }
 
 type state struct {
@@ -37,9 +39,14 @@ type state struct {
 var randomID = regexp.MustCompile(`^[A-Z2-7]{26,}$`)
 
 func (p *Proposal) UnmarshalJSON(data []byte) error {
-	fields, err := object(data, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
+	fields, err := objectWithOptional(data, []string{"offer", "decision_inbound"}, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
 	if err != nil {
 		return err
+	}
+	if raw, ok := fields["offer"]; ok {
+		if _, err := object(raw, "channel", "chat", "sender", "delivery_id", "expires"); err != nil {
+			return err
+		}
 	}
 	type plain Proposal
 	if err := json.Unmarshal(data, (*plain)(p)); err != nil {
@@ -53,6 +60,12 @@ func (p Proposal) validate(reviewed map[string]int) error {
 	count, exists := reviewed[p.Session]
 	if !exists || count == 0 || !randomID.MatchString(p.ID) || p.Kind != "fact" || p.Created.IsZero() || len(p.Messages) == 0 {
 		return fmt.Errorf("invalid proposal identity, kind, creation time or evidence")
+	}
+	if p.DecisionInbound != "" && (!memory.ValidIdentity(p.DecisionInbound) || p.Offer == nil || p.Status == "pending") {
+		return fmt.Errorf("invalid learning decision inbound")
+	}
+	if p.Offer != nil && !p.Offer.valid() {
+		return fmt.Errorf("invalid learning offer")
 	}
 	if err := memory.ValidateFactText(p.Text); err != nil {
 		return err
@@ -108,12 +121,19 @@ func load(root *os.Root, name string) (state, error) {
 			return st, fmt.Errorf("invalid reviewed session or count")
 		}
 	}
+	deliveries := map[string]bool{}
 	ids := map[string]bool{}
 	for _, p := range st.Proposals {
 		if ids[p.ID] {
 			return st, fmt.Errorf("duplicate proposal ID")
 		}
 		ids[p.ID] = true
+		if p.Offer != nil {
+			if deliveries[p.Offer.DeliveryID] {
+				return st, fmt.Errorf("duplicate offer delivery ID")
+			}
+			deliveries[p.Offer.DeliveryID] = true
+		}
 		if err := p.validate(st.Reviewed); err != nil {
 			return st, err
 		}

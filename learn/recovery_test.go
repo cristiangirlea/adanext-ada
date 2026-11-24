@@ -26,7 +26,7 @@ func TestInterruptedProfileChanges(t *testing.T) {
 	journal := filepath.Join(f.dir, "learning", ".intent-owner.json")
 	prepare := func(action string) {
 		t.Helper()
-		data, err := json.Marshal(intent{p.ID, action, now})
+		data, err := json.Marshal(intent{ID: p.ID, Action: action, At: now})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,6 +119,46 @@ func TestKeepRefusedByFullProfile(t *testing.T) {
 	pending, err := f.List("owner", false)
 	if err != nil || len(pending) != 1 || pending[0].ID != items[0].ID || !slices.Equal(f.Memory.Facts("owner"), before) {
 		t.Fatal(pending, err)
+	}
+}
+
+func TestRecoverRefusesButtonIntentConflictingWithOffer(t *testing.T) {
+	for _, mode := range []string{"expired", "no offer", "action not keep"} {
+		t.Run(mode, func(t *testing.T) {
+			f := setupPrivateOffer(t)
+			items, err := Propose(t.Context(), &fake{reply: one("likes tea", "[0]")}, f.Store, "owner", f.session)
+			if err != nil || len(items) != 1 {
+				t.Fatal(items, err)
+			}
+			now := time.Now().UTC()
+			op := intent{ID: items[0].ID, Action: "keep", At: now, DecisionInbound: "press"}
+			offer := Offer{Channel: "cli", Chat: "local", Sender: "me", DeliveryID: "delivery", Expires: now.Add(time.Hour)}
+			if mode != "no offer" {
+				if ok, err := f.BindOffer("owner", op.ID, offer); err != nil || !ok {
+					t.Fatal(ok, err)
+				}
+			}
+			switch mode {
+			case "expired":
+				op.At = offer.Expires
+			case "action not keep":
+				op.Action = "reject"
+			}
+			journal := filepath.Join(f.dir, "learning", ".intent-owner.json")
+			data, err := json.Marshal(op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(journal, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.List("owner", true); err == nil || !strings.Contains(err.Error(), "learning intent conflicts with offer") {
+				t.Fatalf("recovered conflicting intent: %v", err)
+			}
+			if _, err := os.Stat(journal); err != nil || len(f.Memory.Facts("owner")) != 0 {
+				t.Fatal("conflicting recovery changed persisted state", err)
+			}
+		})
 	}
 }
 
