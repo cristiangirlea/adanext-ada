@@ -26,10 +26,17 @@ func TestAutoDelegateRequiresExactApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	withSkills := d
+	withSkills.Skills = true
+	skillSummary, err := withSkills.Summary(task(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("ADA_TEST_DELEGATE", "auto")
 	for name, ctx := range map[string]context.Context{
-		"no approval":     t.Context(),
-		"other directory": context.WithValue(t.Context(), approvedSummaryKey{}, summary),
+		"no approval":         t.Context(),
+		"other skill setting": context.WithValue(t.Context(), approvedSummaryKey{}, skillSummary),
+		"other directory":     context.WithValue(t.Context(), approvedSummaryKey{}, summary),
 	} {
 		t.Run(name, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "started")

@@ -42,6 +42,7 @@ type Settings struct {
 }
 
 type LearningSettings struct {
+	Skills           bool
 	KnowledgeBackend *string
 	ProposeEvery     time.Duration
 	OfferTTL         time.Duration
@@ -50,6 +51,7 @@ type LearningSettings struct {
 }
 
 type HRNSettings struct {
+	Skills  bool
 	Home    string
 	Path    string
 	Mode    string
@@ -59,6 +61,7 @@ type HRNSettings struct {
 
 type fileSettings struct {
 	Learning struct {
+		Skills           bool            `json:"skills"`
 		KnowledgeBackend json.RawMessage `json:"knowledge_backend"`
 		ProposeEvery     json.RawMessage `json:"propose_every"`
 		OfferTTL         string          `json:"offer_ttl"`
@@ -76,6 +79,7 @@ type fileSettings struct {
 		Timeout       string `json:"timeout"`
 	} `json:"budget"`
 	HRN struct {
+		Skills  bool   `json:"skills"`
 		Home    string `json:"home"`
 		Path    string `json:"path"`
 		Mode    string `json:"mode"`
@@ -115,6 +119,7 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	s.Learning.Skills = data.Learning.Skills
 	// Only an omitted backend inherits the delegate setting.
 	if raw := data.Learning.KnowledgeBackend; raw != nil {
 		var backend string
@@ -159,7 +164,7 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s.Budget = loop.Budget{MaxIterations: data.Budget.MaxIterations, MaxTokens: data.Budget.MaxTokens, Timeout: turnTimeout}
-	s.HRN = HRNSettings{Home: data.HRN.Home, Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
+	s.HRN = HRNSettings{Skills: data.HRN.Skills, Home: data.HRN.Home, Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
 	if err := s.validate(); err != nil {
 		return Settings{}, err
 	}
@@ -199,6 +204,9 @@ func (s Settings) validate() error {
 	}
 	if s.ChatProvider == "" {
 		return fmt.Errorf("chat_provider is required")
+	}
+	if s.HRN.Skills && s.HRN.Backend != "claude" {
+		return fmt.Errorf("hrn.skills requires hrn.backend claude")
 	}
 	if s.HRN.Mode != "" && s.HRN.Mode != "readonly" && s.HRN.Mode != "auto" {
 		return fmt.Errorf("hrn.mode must be readonly or auto")
@@ -301,6 +309,10 @@ func (s Settings) hrnOptions() hrnexec.Options {
 	return hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
 }
 
+func (s Settings) SkillReview() learn.SkillReview {
+	return learn.SkillReview{Options: s.hrnOptions(), Timeout: s.HRN.Timeout}
+}
+
 func (s Settings) KnowledgeReview() learn.KnowledgeReview {
 	backend := s.HRN.Backend
 	if s.Learning.KnowledgeBackend != nil {
@@ -380,7 +392,7 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 	if len(s.WorkspaceRoots) > 0 {
 		if err := registry.Add(tool.Delegate{
 			RecordDelegation: (learn.Store{Memory: store}).RecordDelegation,
-			Roots:            s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
+			Skills:           s.HRN.Skills, Roots: s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
 			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
 		}); err != nil {
 			store.Close()

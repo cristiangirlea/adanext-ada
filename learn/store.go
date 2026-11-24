@@ -1,4 +1,4 @@
-// Package learn records proposals and decisions for profile facts and project knowledge.
+// Package learn records proposals and decisions for profile facts, project knowledge and coding skills.
 package learn
 
 import (
@@ -13,33 +13,42 @@ import (
 	"github.com/cristiangirlea/adanext-ada/memory"
 )
 
-type Store struct{ Memory *memory.Store }
+type Store struct {
+	Memory   *memory.Store
+	Roots    []string
+	Diagnose func(string)
+}
 
 type Proposal struct {
-	Draft           string    `json:"draft,omitempty"`
-	SourceRuns      []string  `json:"source_runs,omitempty"`
-	Version         string    `json:"version,omitempty"`
-	Offer           *Offer    `json:"offer,omitempty"`
-	DecisionInbound string    `json:"decision_inbound,omitempty"`
-	ID              string    `json:"id"`
-	Kind            string    `json:"kind"`
-	Text            string    `json:"text"`
-	Session         string    `json:"session"`
-	Messages        []int     `json:"messages"`
-	Outside         bool      `json:"outside"`
-	Status          string    `json:"status"`
-	Created         time.Time `json:"created"`
-	Decided         time.Time `json:"decided"`
-	FactID          string    `json:"fact_id"`
-	Confirmed       time.Time `json:"confirmed"`
+	Repo            string       `json:"repo,omitempty"`
+	Skill           *Skill       `json:"skill,omitempty"`
+	Measure         *Measurement `json:"measure,omitempty"`
+	Draft           string       `json:"draft,omitempty"`
+	SourceRuns      []string     `json:"source_runs,omitempty"`
+	Version         string       `json:"version,omitempty"`
+	Offer           *Offer       `json:"offer,omitempty"`
+	DecisionInbound string       `json:"decision_inbound,omitempty"`
+	ID              string       `json:"id"`
+	Kind            string       `json:"kind"`
+	Text            string       `json:"text"`
+	Session         string       `json:"session"`
+	Messages        []int        `json:"messages"`
+	Outside         bool         `json:"outside"`
+	Status          string       `json:"status"`
+	Created         time.Time    `json:"created"`
+	Decided         time.Time    `json:"decided"`
+	FactID          string       `json:"fact_id"`
+	Confirmed       time.Time    `json:"confirmed"`
 }
 
 type state struct {
-	Proposals        []Proposal        `json:"proposals"`
-	Reviewed         map[string]int    `json:"reviewed"`
-	RunFailures      map[string]int    `json:"review_failures,omitempty"`
-	ReviewedRuns     map[string]bool   `json:"reviewed_runs,omitempty"`
-	KnowledgeBackoff *knowledgeBackoff `json:"knowledge_backoff,omitempty"`
+	SkillReviewedRuns   map[string]bool   `json:"skill_reviewed_runs,omitempty"`
+	SkillReviewFailures map[string]int    `json:"skill_review_failures,omitempty"`
+	Proposals           []Proposal        `json:"proposals"`
+	Reviewed            map[string]int    `json:"reviewed"`
+	RunFailures         map[string]int    `json:"review_failures,omitempty"`
+	ReviewedRuns        map[string]bool   `json:"reviewed_runs,omitempty"`
+	KnowledgeBackoff    *knowledgeBackoff `json:"knowledge_backoff,omitempty"`
 }
 
 type knowledgeBackoff struct {
@@ -56,7 +65,7 @@ func (b *knowledgeBackoff) waiting(now time.Time) bool {
 var randomID = regexp.MustCompile(`^[A-Z2-7]{26,}$`)
 
 func (p *Proposal) UnmarshalJSON(data []byte) error {
-	fields, err := objectWithOptional(data, []string{"offer", "decision_inbound", "draft", "source_runs", "version"}, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
+	fields, err := objectWithOptional(data, []string{"repo", "skill", "measure", "offer", "decision_inbound", "draft", "source_runs", "version"}, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
 	if err != nil {
 		return err
 	}
@@ -69,11 +78,25 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, (*plain)(p)); err != nil {
 		return err
 	}
+	for _, key := range []string{"repo", "skill", "measure"} {
+		if fields[key] != nil && p.Kind != "skill" {
+			return fmt.Errorf("%s field on %s proposal", key, p.Kind)
+		}
+	}
+	if p.Kind == "skill" && (fields["draft"] != nil || fields["version"] != nil || fields["decision_inbound"] != nil) {
+		return fmt.Errorf("skill proposal contains unrelated fields")
+	}
 	p.Messages, err = messageIndices(fields["messages"])
 	return err
 }
 
 func (p Proposal) validate(reviewed map[string]int) error {
+	if p.Kind == "skill" {
+		return p.validateSkill()
+	}
+	if p.Skill != nil || p.Measure != nil || p.Repo != "" {
+		return fmt.Errorf("unexpected skill fields")
+	}
 	if p.Kind == "knowledge" {
 		return p.validateKnowledge()
 	}
@@ -129,14 +152,14 @@ func load(root *os.Root, name string) (state, error) {
 	if err != nil {
 		return st, err
 	}
-	fields, err := objectWithOptional(data, []string{"reviewed_runs", "run_failures", "review_failures", "knowledge_backoff"}, "proposals", "reviewed")
+	fields, err := objectWithOptional(data, []string{"skill_reviewed_runs", "skill_review_failures", "reviewed_runs", "run_failures", "review_failures", "knowledge_backoff"}, "proposals", "reviewed")
 	if err != nil {
 		return st, err
 	}
 	if _, err := object(fields["reviewed"]); err != nil {
 		return st, err
 	}
-	for _, key := range []string{"reviewed_runs", "run_failures", "review_failures"} {
+	for _, key := range []string{"skill_reviewed_runs", "skill_review_failures", "reviewed_runs", "run_failures", "review_failures"} {
 		if raw, ok := fields[key]; ok {
 			if _, err := object(raw); err != nil {
 				return st, err
@@ -157,6 +180,16 @@ func load(root *os.Root, name string) (state, error) {
 	for id, reviewed := range st.ReviewedRuns {
 		if !runID.MatchString(id) || !reviewed {
 			return st, fmt.Errorf("invalid reviewed run")
+		}
+	}
+	for id, done := range st.SkillReviewedRuns {
+		if !runID.MatchString(id) || !done {
+			return st, fmt.Errorf("invalid reviewed skill run")
+		}
+	}
+	for id, n := range st.SkillReviewFailures {
+		if !runID.MatchString(id) || st.SkillReviewedRuns[id] || n < 1 || n >= maxRunFailures {
+			return st, fmt.Errorf("invalid skill review failure count")
 		}
 	}
 	legacy := fields["run_failures"] != nil
@@ -196,7 +229,11 @@ func load(root *os.Root, name string) (state, error) {
 			deliveries[p.Offer.DeliveryID] = true
 		}
 		for _, run := range p.SourceRuns {
-			if !st.ReviewedRuns[run] {
+			reviewed := st.ReviewedRuns
+			if p.Kind == "skill" {
+				reviewed = st.SkillReviewedRuns
+			}
+			if !reviewed[run] {
 				return st, fmt.Errorf("proposal cites an unreviewed run")
 			}
 		}
@@ -212,6 +249,7 @@ type transaction struct {
 	root       *os.Root
 	store      Store
 	user, name string
+	note       string
 }
 
 func (s Store) withUser(user string, fn func(*transaction) error) error {
@@ -224,15 +262,25 @@ func (s Store) withUser(user string, fn func(*transaction) error) error {
 		if err != nil {
 			return fmt.Errorf("read learning file: %w", err)
 		}
-		tx := transaction{st, root, s, user, name}
+		tx := transaction{state: st, root: root, store: s, user: user, name: name}
 		if err := tx.recover(); err != nil {
+			return err
+		}
+		if err := tx.recoverMeasures(); err != nil {
 			return err
 		}
 		return fn(&tx)
 	})
 }
 
-func (tx *transaction) save() error { return memory.WriteJSON(tx.root, tx.name, tx.state) }
+func (tx *transaction) save() error {
+	for _, p := range tx.Proposals {
+		if err := p.validate(tx.Reviewed); err != nil {
+			return err
+		}
+	}
+	return memory.WriteJSON(tx.root, tx.name, tx.state)
+}
 
 func (tx *transaction) find(id string) (*Proposal, error) {
 	for i := range tx.Proposals {
@@ -257,7 +305,13 @@ func (s Store) List(user string, all bool) ([]Proposal, error) {
 }
 
 func (s Store) Decide(user, id, action string, outside bool, now time.Time) (Proposal, error) {
+	p, _, err := s.DecideWithNote(user, id, action, outside, now)
+	return p, err
+}
+
+func (s Store) DecideWithNote(user, id, action string, outside bool, now time.Time) (Proposal, string, error) {
 	var result Proposal
+	var note string
 	err := s.withUser(user, func(tx *transaction) error {
 		p, err := tx.find(id)
 		if err != nil {
@@ -266,19 +320,23 @@ func (s Store) Decide(user, id, action string, outside bool, now time.Time) (Pro
 		switch action {
 		case "keep":
 			if p.Status == "pending" && p.Outside && !outside {
-				return fmt.Errorf("outside evidence requires -outside to keep this fact")
+				return fmt.Errorf("outside evidence requires -outside to keep this proposal")
 			}
 		case "reject", "rollback", "restore", "confirm":
 		default:
 			return fmt.Errorf("unknown learning decision %q", action)
 		}
+		if now.IsZero() {
+			now = time.Now().UTC()
+		}
 		if err := tx.change(p, action, now); err != nil {
 			return err
 		}
 		result = *p
+		note = tx.note
 		return nil
 	})
-	return result, err
+	return result, note, err
 }
 
 type transition struct {
@@ -301,10 +359,16 @@ func (tx *transaction) change(p *Proposal, action string, now time.Time) error {
 	if !slices.Contains(step.from, p.Status) {
 		return fmt.Errorf("cannot %s a %s proposal", action, p.Status)
 	}
+	if p.Kind == "skill" {
+		now = p.skillDecisionTime(now)
+	}
 	if now.Before(p.Created) || now.Before(p.Decided) {
 		return fmt.Errorf("decision precedes proposal history")
 	}
 	now = now.UTC()
+	if p.Kind == "skill" {
+		return tx.changeSkill(p, action, now)
+	}
 	if p.Kind == "knowledge" {
 		switch action {
 		case "keep":

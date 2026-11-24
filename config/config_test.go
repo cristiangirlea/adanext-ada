@@ -23,6 +23,7 @@ const basic = `"providers":[{"name":"local","kind":"openai","base_url":"http://l
 func TestLoadRefusesInvalidSettings(t *testing.T) {
 	for _, tc := range []struct{ settings, want string }{
 		{`{` + basic + `,"other":true}`, "unknown field"},
+		{`{` + basic + `,"hrn":{"backend":"codex","skills":true}}`, "hrn.skills"},
 		{`{` + basic + `,"hrn":{"mode":"write"}}`, "hrn.mode"},
 		{`{}`, "chat_provider"},
 		{`{` + basic + `,"hrn":{"mode":"yolo"}}`, "hrn.mode must be readonly or auto"},
@@ -44,6 +45,34 @@ func TestLoadAllowsExplicitMeteredHRN(t *testing.T) {
 	s, err := Load(settingsFile(t, `{`+basic+`,"hrn":{"backend":"api"},"allow_metered":true}`))
 	if err != nil || s.HRN.Backend != "api" {
 		t.Fatalf("Load = %+v, %v", s.HRN, err)
+	}
+}
+
+func TestDelegateSkillSetting(t *testing.T) {
+	for _, skills := range []bool{false, true} {
+		root := t.TempDir()
+		hrn, _ := json.Marshal(map[string]any{"backend": "claude", "path": os.Args[0], "skills": skills})
+		roots, _ := json.Marshal([]string{root})
+		data, _ := json.Marshal(t.TempDir())
+		s, err := Load(settingsFile(t, `{`+basic+`,"workspace_roots":`+string(roots)+`,"data_dir":`+string(data)+`,"learning":{"skills":true},"hrn":`+string(hrn)+`}`))
+		if err != nil || !s.Learning.Skills {
+			t.Fatal(err)
+		}
+		t.Setenv("ADA_TEST_CONFIG_HRN", "1")
+		t.Setenv("ADA_TEST_EXPECT_HOME", root)
+		s.HRN.Home = root
+		t.Setenv("ADA_EXPECT_SKILLS", fmt.Sprint(skills))
+		app, err := Build(s, os.Getenv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input, _ := json.Marshal(map[string]string{"prompt": "review", "dir": root})
+		_, err = app.Tools.Run(approval.WithSession(memory.WithUser(t.Context(), "owner"), "test-session"), "delegate_to_hrn", input)
+		app.Tools.Close()
+		app.Store.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -130,11 +159,18 @@ func TestMain(m *testing.M) {
 		}
 		fmt.Println(`{"v":1,"seq":1,"type":"hello","protocol":"v1"}`)
 		var start struct {
-			AttemptID string `json:"attempt_id"`
+			AttemptID string                     `json:"attempt_id"`
+			Task      map[string]json.RawMessage `json:"task"`
 		}
 		scanner := bufio.NewScanner(os.Stdin)
 		if !scanner.Scan() || json.Unmarshal(scanner.Bytes(), &start) != nil || start.AttemptID == "" {
 			os.Exit(2)
+		}
+		if want := os.Getenv("ADA_EXPECT_SKILLS"); want != "" {
+			raw, ok := start.Task["skills"]
+			if ok != (want == "true") || ok && string(raw) != "true" {
+				os.Exit(2)
+			}
 		}
 		fmt.Printf(`{"v":1,"seq":2,"type":"accepted","attempt_id":%q,"run_id":"20261123-120000-abcdef"}`+"\n", start.AttemptID)
 		fmt.Printf(`{"v":1,"seq":3,"type":"result","attempt_id":%q,"run_id":"20261123-120000-abcdef","result":{"status":"ok","final":"filtered"}}`+"\n", start.AttemptID)

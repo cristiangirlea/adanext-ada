@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -37,6 +38,7 @@ type Options struct {
 }
 
 type Task struct {
+	Skills  *bool  `json:"skills,omitempty"`
 	Prompt  string `json:"prompt"`
 	Dir     string `json:"dir,omitempty"`
 	Backend string `json:"backend,omitempty"`
@@ -245,7 +247,15 @@ func hrnCommand(opts Options, args ...string) (*exec.Cmd, error) {
 	if opts.HRNPath == "" {
 		opts.HRNPath = "hrn"
 	}
-	cmd := exec.Command(opts.HRNPath, args...)
+	path, err := exec.LookPath(opts.HRNPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve hrn: %w", err)
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(path, args...)
 	setProcessAttributes(cmd)
 	if len(opts.WithoutEnv) > 0 {
 		cmd.Env = slices.DeleteFunc(cmd.Environ(), func(entry string) bool {

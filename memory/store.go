@@ -111,6 +111,27 @@ func (s *Store) lockFile(name string) (*os.File, error) {
 	return file, nil
 }
 
+var ErrMeasuring = errors.New("already being measured")
+
+// The caller holds learning.lock when acquiring the separate, nonblocking evaluation slot.
+func TryMeasureLock(root *os.Root, id string) (func(), error) {
+	if !filepath.IsLocal(id) || filepath.Base(id) != id {
+		return nil, fmt.Errorf("invalid measurement ID")
+	}
+	file, err := root.OpenFile(filepath.Join("skills", id+".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockExclusive(file); err != nil {
+		file.Close()
+		if errors.Is(err, errDirectoryBusy) {
+			return nil, ErrMeasuring
+		}
+		return nil, err
+	}
+	return func() { releaseLock(file) }, nil
+}
+
 var errDirectoryBusy = errors.New("another Ada process is using the data directory")
 var errWriterRequired = errors.New("session writer lock required")
 

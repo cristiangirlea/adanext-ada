@@ -36,7 +36,7 @@ func (t ReadFile) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	root, rel, err := withinRoots(input.Path, t.Roots)
+	root, rel, err := WithinRoots(input.Path, t.Roots)
 	if err != nil {
 		return "", fmt.Errorf("read file: %w", err)
 	}
@@ -77,8 +77,9 @@ func (t ReadFile) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	return string(data), nil
 }
 
-func withinRoots(path string, roots []string) (rootPath, relative string, err error) {
-	outsideOrMissing := errors.New("path is outside the configured roots or does not exist")
+var ErrOutsideRoots = errors.New("path is outside the configured roots or does not exist")
+
+func WithinRoots(path string, roots []string) (rootPath, relative string, err error) {
 	if path == "" {
 		return "", "", fmt.Errorf("path is required")
 	}
@@ -97,7 +98,7 @@ func withinRoots(path string, roots []string) (rootPath, relative string, err er
 			return resolved, rel, nil
 		}
 	}
-	return "", "", outsideOrMissing
+	return "", "", ErrOutsideRoots
 }
 
 func resolvedPath(path string) (string, error) {

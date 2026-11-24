@@ -22,6 +22,7 @@ const DefaultDelegateTimeout = 30 * time.Minute
 var delegatePurposes = []string{"review", "debug", "implement", "refactor", "test", "research", "plan", "ops"}
 
 type Delegate struct {
+	Skills           bool
 	RecordDelegation func(runID, user, session string) error
 	Roots            []string
 	Options          hrnexec.Options
@@ -80,7 +81,7 @@ func (t Delegate) task(raw json.RawMessage) (hrnexec.Task, error) {
 			return hrnexec.Task{}, fmt.Errorf("invalid delegation purpose %q", purpose)
 		}
 	}
-	root, rel, err := withinRoots(input.Dir, t.Roots)
+	root, rel, err := WithinRoots(input.Dir, t.Roots)
 	if err != nil {
 		return hrnexec.Task{}, fmt.Errorf("delegate workspace: %w", err)
 	}
@@ -95,15 +96,24 @@ func (t Delegate) task(raw json.RawMessage) (hrnexec.Task, error) {
 	if t.Timeout <= 0 {
 		t.Timeout = DefaultDelegateTimeout
 	}
+	var skills *bool
+	if t.Skills {
+		skills = &t.Skills
+	}
 	return hrnexec.Task{
+		Skills: skills,
 		Prompt: input.Prompt, Dir: dir, Backend: t.Backend, Mode: t.Mode,
 		Timeout: t.Timeout.String(), Purpose: purpose,
 	}, nil
 }
 
 func delegateSummary(task hrnexec.Task) string {
-	return fmt.Sprintf("hrn exec backend=%q mode=%q dir=%q timeout=%s purpose=%q prompt=%q",
-		task.Backend, task.Mode, task.Dir, task.Timeout, task.Purpose, task.Prompt)
+	var skills string
+	if task.Skills != nil {
+		skills = fmt.Sprintf(" skills=%t", *task.Skills)
+	}
+	return fmt.Sprintf("hrn exec backend=%q mode=%q dir=%q timeout=%s purpose=%q%s prompt=%q",
+		task.Backend, task.Mode, task.Dir, task.Timeout, task.Purpose, skills, task.Prompt)
 }
 
 func (t Delegate) Summary(raw json.RawMessage) (string, error) {
