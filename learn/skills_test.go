@@ -897,6 +897,9 @@ func TestSkillReviewContinuesAfterRepositoryReadFailure(t *testing.T) {
 		}
 		acl("/deny", "*S-1-1-0:(OI)(CI)(RX)")
 		t.Cleanup(func() { acl("/remove:d", "*S-1-1-0") })
+		if _, err := os.Lstat(skills); err == nil {
+			t.Skip("test user can read past a deny ACL")
+		}
 	} else {
 		if err := os.Chmod(parent, 0); err != nil {
 			t.Fatal(err)
@@ -1114,7 +1117,12 @@ func TestTransactionRefusesInvalidSkill(t *testing.T) {
 func TestMeasurePreservesMissingOwnerWorktree(t *testing.T) {
 	f := newSkillFixture(t)
 	p := f.propose(t)
-	dir := filepath.Join(t.TempDir(), "owner")
+	// Git prints the long form of a short (8.3) temp path.
+	tmp, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(tmp, "owner")
 	testGit(t, f.repo, "worktree", "add", "--detach", dir, "HEAD")
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatal(err)
