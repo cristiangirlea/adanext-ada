@@ -82,6 +82,9 @@ func (tx *transaction) recover() error {
 	if op.DecisionInbound != "" && (!memory.ValidIdentity(op.DecisionInbound) || op.Action != "keep" || p.Offer == nil || !op.At.Before(p.Offer.Expires)) {
 		return fmt.Errorf("learning intent conflicts with offer")
 	}
+	if p.Kind == "skill" {
+		return tx.recoverSkillDecision(p, op)
+	}
 	if p.Kind == "knowledge" {
 		if op.Action != "reject" || op.At.Before(p.Created) || (p.Status != "pending" && !(p.Status == "rejected" && p.Decided.Equal(op.At))) {
 			return fmt.Errorf("learning intent conflicts with knowledge proposal")

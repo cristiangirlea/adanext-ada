@@ -159,11 +159,111 @@ active version and generation before preparing that request. The maintainer
 controls hrn activation and rollback. Project knowledge stays out of chat
 offers, user profiles and fact staleness checks.
 
+## Skills from delegated runs
+
+Set `learning.skills` to `true` to review skills after project knowledge in
+`ada learn propose` and each serve sweep. Both settings described here
+default to `false`. Set `hrn.skills` to `true` separately to load installed
+skills during delegations. This requires `hrn.backend` set to `claude` and
+an hrn build that accepts the `skills` field in exec tasks. With the setting
+off, Ada omits that field. [hrn exec support](https://github.com/cristiangirlea/harness/issues/1001).
+
+The owner reviews skills for all users. Ada selects up to five recorded
+delegations, taking new runs before retries and the oldest run in each group
+first. It reads the run with `hrn show --json`. Only successful runs in Git
+repositories within `workspace_roots` qualify. The configured chat provider
+receives the first 4 KiB of the task prompt and the first 8 KiB of the final
+answer in separate evidence blocks. The review uses no tools and follows
+`allow_metered`. It can propose one reusable procedure or repository
+convention. Ada skips repositories with no HEAD commit or with a file in
+place of a skill parent directory before calling the provider. Ada saves each
+review before starting the next run. A failed `hrn show`, an unreadable or
+oversize record, a read error in the run's repository, a Git command that
+exits with an error there, or an invalid model reply counts against that run.
+Three such failures retire it. A provider error, an unavailable executable,
+a missing configured root, a timeout or cancellation stops the batch. The
+interrupted run remains eligible for retry.
+
+Read the whole skill body with `ada learn list` before measuring it.
+Ada skips names already proposed for that repository or
+present at HEAD or on disk. Run records come from tool output, so every
+skill requires the owner's explicit `-outside` confirmation. Skills stay
+out of chat offers, profiles and staleness checks.
+
+### Measuring a skill
+
+Only the explicit CLI command spends plan runs. Every selected task runs
+twice per repeat, once without the skill and once with it. This example
+runs one task four times.
+
+```json
+{
+  "skills": true,
+  "matrix": [{"name": "with-plan", "backend": "claude"}],
+  "repeats": 2,
+  "tasks": [{
+    "id": "build",
+    "prompt": "Build the project and resolve any build failures.",
+    "gate": ["go build ./..."]
+  }]
+}
+```
+
+Run `ada learn measure ID -spec eval.json`. The default base is `HEAD` and
+the timeout is four hours. To choose both a revision and a reproducible
+task split, use `ada learn measure ID -spec eval.json -base REF -held-out 0.5 -seed 12 -timeout 2h`.
+The spec needs one claude variant, at least two repeats and skills enabled
+with `skills: true` or `lean: false`. A true `no_skills` is refused, and so
+is a `dir` on the spec, a task or the variant: the spec can live anywhere,
+because Ada decides where the eval runs. `mcp` paths must be absolute, since
+hrn resolves them from that folder, and a top-level key may appear only once
+in any letter case.
+
+Ada prints the full proposed `SKILL.md` before committing it on `ada/skill-<lowercase ID>` in a
+temporary worktree. hrn runs a spec in the folder that holds the spec file
+unless the spec names a `dir`, so Ada passes hrn a private copy of your spec
+with `dir` set to that worktree, and removes the copy afterwards. Your spec
+file is not changed. The evaluated head must match Ada's commit, and the spec
+must be unchanged when the eval ends. Ada prints the
+accepted verdict and reason, records both
+eval IDs and the spec digest, and removes the worktree. The proposal stays
+pending. Only a `better` verdict retains the candidate branch. A repeated
+measure can replace an unchanged Ada branch. A cancellation records no
+new measurement. A completed eval is journaled before Ada takes the
+learning lock to record it. Recovery saves a finished result for a pending
+proposal before removing its worktree. If removal fails or cleanup times out,
+later loads retry cleanup. The measure command prints the finished verdict and
+reason before a cleanup error. If the repository or checkout has changed and
+recovery cannot safely finish, Ada drops the journal. The CLI and serve report
+recovery notes whether a command, a sweep or a chat offer triggers recovery.
+
+Live eval progress treats carriage returns and newlines as line ends. Long
+lines stream in pieces of up to 4 KiB. Ada redacts an entire piece when a
+forced flush contains a credential or ends with a possible credential prefix.
+
+### Deciding a skill
+
+- `ada learn keep ID -outside` checks the better verdict, branch tip and
+  exact committed file. After keeping, merge the named branch into the
+  repository yourself to install the skill. Future delegated runs load it
+  with `hrn.skills` enabled.
+- `ada learn reject ID` dismisses the proposal and removes Ada's unchanged
+  branch. Ada reports a branch it leaves for the owner.
+- `ada learn rollback ID` removes an unchanged, unmerged candidate branch.
+  If the skill is present at HEAD, remove its directory or revert the commit
+  that added it. This also applies if you copied, cherry-picked or squash-merged
+  the skill onto your branch.
+- `ada learn list -all` includes decided skills. Skills cannot be confirmed
+  or restored.
+
+Ada never merges, pushes, checks out or edits the owner's branches.
+The serve sweep never measures or keeps a skill.
+
 ## Commands
 
 | Command | Effect |
 | --- | --- |
-| `ada learn propose [-session ID] [-since 24h]` | Print new fact and project-knowledge proposals. |
+| `ada learn propose [-session ID] [-since 24h]` | Print new fact, project-knowledge and enabled skill proposals. |
 | `ada learn list [-all]` | List pending proposals, or every status with `-all`. |
 | `ada learn keep ID [-outside]` | Add the pending fact to the profile and record its confirmation time. |
 | `ada learn keep ID -version VERSION_ID` | Verify admission and record the version on a pending knowledge proposal. |
@@ -193,5 +293,3 @@ Ada saves proposals and per-session review counts in
 `learning.lock`. A private temporary decision record lets the next command
 recover a profile change interrupted between file replacements. An invalid
 learning file reports an error.
-
-Skills are planned for a later piece of issue #7.

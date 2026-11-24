@@ -124,23 +124,11 @@ type candidate struct {
 }
 
 func parseReply(res provider.Response) ([]candidate, error) {
-	var b strings.Builder
-	for _, block := range res.Content {
-		if block.Type != "text" {
-			return nil, fmt.Errorf("expected only JSON text from learning provider")
-		}
-		b.WriteString(block.Text)
+	raw, err := replyJSON(res, "expected only JSON text from learning provider")
+	if err != nil {
+		return nil, err
 	}
-	raw := strings.TrimSpace(b.String())
-	if strings.HasPrefix(raw, "```json") {
-		header, body, ok := strings.Cut(raw, "\n")
-		body, closed := strings.CutSuffix(body, "\n```")
-		if !ok || !closed || strings.TrimSuffix(header, "\r") != "```json" {
-			return nil, fmt.Errorf("invalid JSON fence")
-		}
-		raw = body
-	}
-	obj, err := object([]byte(raw), "facts")
+	obj, err := object(raw, "facts")
 	if err != nil {
 		return nil, err
 	}

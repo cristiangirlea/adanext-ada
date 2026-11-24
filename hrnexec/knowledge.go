@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/cristiangirlea/adanext-ada/internal/terminal"
 )
 
 type KnowledgeRequest struct {
@@ -35,6 +38,8 @@ type KnowledgePacket struct {
 	EmptyReason string           `json:"empty_reason"`
 	Entries     []KnowledgeEntry `json:"entries"`
 }
+
+var errOutputLimit = errors.New("output exceeds")
 
 type boundedOutput struct {
 	buf      bytes.Buffer
@@ -115,18 +120,31 @@ func runKnowledge(ctx context.Context, opts Options, timeout time.Duration, req 
 	if err := errors.Join(json.NewEncoder(f).Encode(req), f.Close()); err != nil {
 		return nil, fmt.Errorf("write knowledge request: %w", err)
 	}
-	cmd, err := hrnCommand(opts, append([]string{"knowledge"}, args(f.Name())...)...)
+	return runReport(ctx, opts, "", 1<<20, nil, append([]string{"knowledge"}, args(f.Name())...)...)
+}
+
+func runReport(ctx context.Context, opts Options, dir string, limit int, progress io.Writer, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cmd, err := hrnCommand(opts, args...)
 	if err != nil {
 		return nil, err
 	}
-	stdout := boundedOutput{limit: 1 << 20}
+	cmd.Dir = dir
+	stdout := boundedOutput{limit: limit}
 	stderr := boundedOutput{limit: 512}
 	// Redact the values actually inherited by this child even if the parent environment changes.
 	cmd.Env = cmd.Environ()
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	var live *progressWriter
+	if progress != nil {
+		live = newProgressWriter(progress, cmd.Env)
+		cmd.Stderr = io.MultiWriter(live, &stderr)
+	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start hrn knowledge: %w", err)
+		return nil, fmt.Errorf("start hrn %s: %w", args[0], err)
 	}
 	kill, closeTree, err := manageProcessTree(cmd)
 	if err != nil {
@@ -142,14 +160,20 @@ func runKnowledge(ctx context.Context, opts Options, timeout time.Duration, req 
 	case <-ctx.Done():
 		kill()
 		<-done
-		return nil, fmt.Errorf("hrn knowledge: %w", ctx.Err())
+		if live != nil {
+			_ = live.flush()
+		}
+		return nil, fmt.Errorf("hrn %s: %w", args[0], ctx.Err())
 	case waitErr = <-done:
 	}
+	if live != nil {
+		waitErr = errors.Join(waitErr, live.flush())
+	}
 	if waitErr != nil {
-		waitErr = fmt.Errorf("hrn knowledge: %w: %s", waitErr, stderr.diagnostic(cmd.Env))
+		waitErr = fmt.Errorf("hrn %s: %w: %s", args[0], waitErr, terminal.Field(stderr.diagnostic(cmd.Env)))
 	}
 	if stdout.overflow {
-		return nil, fmt.Errorf("hrn knowledge output exceeds 1 MiB")
+		return nil, fmt.Errorf("hrn %s %w %d MiB", args[0], errOutputLimit, limit>>20)
 	}
 	return stdout.buf.Bytes(), waitErr
 }

@@ -10,35 +10,22 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unicode"
 
 	ada "github.com/cristiangirlea/adanext-ada"
 	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/config"
-	"github.com/cristiangirlea/adanext-ada/learn"
+	"github.com/cristiangirlea/adanext-ada/internal/terminal"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/schedule"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
 
-func terminalField(text string) string {
-	var clean strings.Builder
-	for _, r := range text {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
-			quoted := strconv.QuoteRune(r)
-			clean.WriteString(quoted[1 : len(quoted)-1])
-		} else {
-			clean.WriteRune(r)
-		}
-	}
-	return clean.String()
-}
+func terminalField(text string) string { return terminal.Field(text) }
 
 func memoryCommand(command string, args []string, settings config.Settings, store *memory.Store, n int, out io.Writer) error {
 	switch command {
@@ -178,15 +165,19 @@ func newServeService(settings config.Settings, conversation *config.App, diagnos
 		Idle: settings.SessionIdle, History: settings.HistoryMessages,
 		WithoutEnv:   settings.ProviderKeyEnv(),
 		ProposeEvery: settings.Learning.ProposeEvery, OfferTTL: settings.Learning.OfferTTL,
-		Knowledge: settings.KnowledgeReview(),
-		Decision:  (learn.Store{Memory: conversation.Store}).DecideOffer,
+		WorkspaceRoots: settings.WorkspaceRoots, Knowledge: settings.KnowledgeReview(),
 		Status: func(line string) {
 			statusMu.Lock()
 			defer statusMu.Unlock()
 			fmt.Fprintln(diagnostics, terminalField(line))
 		},
 	}
+	service.Decision = service.LearningStore().DecideOffer
 	service.Scheduler = &schedule.Runner{Store: schedule.Store{Memory: conversation.Store}, Loop: conversation.Loop, Owner: settings.Owner, History: settings.HistoryMessages, WithoutEnv: service.WithoutEnv, Deliver: service.Deliver, Status: service.Status}
+	if settings.Learning.Skills {
+		review := settings.SkillReview()
+		service.Skills = &review
+	}
 	return &service
 }
 

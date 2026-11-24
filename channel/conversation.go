@@ -21,6 +21,9 @@ import (
 )
 
 type Service struct {
+	Skills         *learn.SkillReview
+	WorkspaceRoots []string
+
 	Knowledge    learn.KnowledgeReview
 	ProposeEvery time.Duration
 	OfferTTL     time.Duration

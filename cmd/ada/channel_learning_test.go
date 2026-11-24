@@ -41,6 +41,9 @@ func (m *learningModel) Complete(ctx context.Context, req provider.Request) (pro
 		}
 		text = `{"facts":[{"text":"likes tea","messages":[0]},{"text":"likes coffee","messages":[1]}]}`
 	}
+	if strings.Contains(req.System, "one reusable skill") {
+		text = cliSkillReply
+	}
 	return provider.Response{Content: []provider.Block{{Type: "text", Text: text}}}, nil
 }
 

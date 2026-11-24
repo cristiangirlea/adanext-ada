@@ -17,6 +17,14 @@ import (
 	"github.com/cristiangirlea/adanext-ada/provider"
 )
 
+func TestLearnMeasureRequiresSpec(t *testing.T) {
+	k := newKnowledgeCLI(t)
+	_, _, err := k.invoke(t, "measure", "example")
+	if err == nil || !strings.Contains(err.Error(), "requires -spec") {
+		t.Fatal(err)
+	}
+}
+
 func TestLearnCommands(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "settings.json")

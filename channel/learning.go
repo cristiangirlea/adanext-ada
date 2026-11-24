@@ -20,6 +20,10 @@ type offerTarget struct {
 	Expires  time.Time `json:"expires"`
 }
 
+func (s *Service) LearningStore() learn.Store {
+	return learn.Store{Memory: s.Store, Roots: s.WorkspaceRoots, Diagnose: func(note string) { s.status("learning", note) }}
+}
+
 func (s *Service) runLearning(ctx context.Context) {
 	review := s.Knowledge.WithDiagnostics(func(message string) { s.status("learning", message) })
 	if !review.Enabled() {
@@ -45,7 +49,7 @@ func (s *Service) proposeRecent(ctx context.Context, review learn.KnowledgeRevie
 	if err != nil {
 		return err
 	}
-	store := learn.Store{Memory: s.Store}
+	store := s.LearningStore()
 	var failures []error
 	for _, user := range users {
 		if err := ctx.Err(); err != nil {
@@ -71,6 +75,14 @@ func (s *Service) proposeRecent(ctx context.Context, review learn.KnowledgeRevie
 		if err != nil {
 			failures = append(failures, err)
 		}
+	}
+	if s.Skills != nil {
+		review := *s.Skills
+		review.Diagnose = store.Diagnose
+		skillCtx, cancel := context.WithTimeout(ctx, s.Loop.Budget.WithDefaults().Timeout)
+		_, err := store.ProposeSkills(skillCtx, s.Loop.Provider, s.Owner, review)
+		cancel()
+		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
 }
@@ -112,9 +124,8 @@ func (h *Host) prepareDelivery(d pending) (bool, error) {
 		return true, nil
 	}
 	if !h.Groups && h.service.Decision != nil {
-		store := learn.Store{Memory: h.service.Store}
 		offer := learn.Offer{Channel: h.Name, Chat: d.ChatID, Sender: target.Sender, DeliveryID: d.ID, Expires: target.Expires}
-		allowed, err := store.BindOffer(target.User, target.Proposal, offer)
+		allowed, err := h.service.LearningStore().BindOffer(target.User, target.Proposal, offer)
 		if err != nil {
 			h.service.status("learning", fmt.Sprintf("bind offer %s: %v", target.Proposal, err))
 		}
@@ -127,7 +138,7 @@ func (h *Host) prepareDelivery(d pending) (bool, error) {
 }
 
 func (h *Host) awaitingOffer(in *p.Inbound, user string) (bool, error) {
-	items, err := (learn.Store{Memory: h.service.Store}).List(user, false)
+	items, err := h.service.LearningStore().List(user, false)
 	if err != nil {
 		return false, err
 	}
