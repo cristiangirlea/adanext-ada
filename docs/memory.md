@@ -40,7 +40,8 @@ origins and first user line.
 `profiles/<user>.json` and prints its ID. Ada encodes IDs that could be unsafe
 or ambiguous as filenames. Profile writers briefly hold `profile.lock`, so
 facts can be edited during a chat. Use `ada profile list` and `ada profile remove ID` to
-manage facts. Only the CLI adds facts. Each model request includes the current
+manage facts. Keeping a [learning proposal](learning.md) in a paired chat
+also adds its fact. Each model request includes the current
 user's profile in its system prompt. Requests without a user include no
 profile. The limits are 40 facts, 300 UTF-8 bytes per fact and 4,000 bytes of
 text altogether.
@@ -73,4 +74,6 @@ its environment. Ada filters configured provider key variables before launch.
 Memory stays on the machine except for content sent in configured model
 requests and hrn's own calls. Each CLI subcommand accepts `-config FILE`
 before its positional arguments.
+
+The same scope is used to [propose and review project knowledge](learning.md#project-knowledge-from-delegated-runs) from successful delegated runs.
 

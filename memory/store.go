@@ -33,6 +33,7 @@ type Store struct {
 }
 
 type Origin struct {
+	Private   bool      `json:"private,omitempty"`
 	Channel   string    `json:"channel"`
 	Chat      string    `json:"chat"`
 	Sender    string    `json:"sender"`
@@ -95,6 +96,11 @@ func (s *Store) Close() error {
 
 func (s *Store) lockFile(name string) (*os.File, error) {
 	file, err := s.root.OpenFile(name, os.O_CREATE|os.O_RDWR, 0600)
+	// macOS can report a create-open as missing while another opener is creating the same file.
+	for attempt := 1; errors.Is(err, fs.ErrNotExist) && attempt < 5; attempt++ {
+		time.Sleep(time.Duration(attempt) * 5 * time.Millisecond)
+		file, err = s.root.OpenFile(name, os.O_CREATE|os.O_RDWR, 0600)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", name, err)
 	}
@@ -103,6 +109,27 @@ func (s *Store) lockFile(name string) (*os.File, error) {
 		return nil, fmt.Errorf("lock %s: %w", name, err)
 	}
 	return file, nil
+}
+
+var ErrMeasuring = errors.New("already being measured")
+
+// The caller holds learning.lock when acquiring the separate, nonblocking evaluation slot.
+func TryMeasureLock(root *os.Root, id string) (func(), error) {
+	if !filepath.IsLocal(id) || filepath.Base(id) != id {
+		return nil, fmt.Errorf("invalid measurement ID")
+	}
+	file, err := root.OpenFile(filepath.Join("skills", id+".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockExclusive(file); err != nil {
+		file.Close()
+		if errors.Is(err, errDirectoryBusy) {
+			return nil, ErrMeasuring
+		}
+		return nil, err
+	}
+	return func() { releaseLock(file) }, nil
 }
 
 var errDirectoryBusy = errors.New("another Ada process is using the data directory")
@@ -138,12 +165,36 @@ type userKey struct{}
 func (s *Store) WithScheduleFiles(fn func(*os.Root) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.root.MkdirAll("schedule", 0700); err != nil {
-		return fmt.Errorf("create schedule directory: %w", err)
+	return s.withFiles("schedule", filepath.Join("schedule", "schedule.lock"), fn)
+}
+
+// Learning transactions may acquire profile.lock while holding learning.lock.
+func (s *Store) WithLearningFiles(fn func(*os.Root) error) error {
+	return s.withFiles("learning", "learning.lock", fn)
+}
+
+// A separate review slot prevents duplicate model calls without blocking an owner's decisions.
+func (s *Store) WithLearningReview(fn func() error) error {
+	return s.withFileLock("learning-review.lock", fn)
+}
+
+func (s *Store) withFiles(dir, lockPath string, fn func(*os.Root) error) error {
+	if err := s.root.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create %s directory: %w", dir, err)
 	}
-	lockPath := filepath.Join("schedule", "schedule.lock")
+	return s.withFileLock(lockPath, func() error {
+		root, err := s.root.OpenRoot(dir)
+		if err != nil {
+			return fmt.Errorf("open %s directory: %w", dir, err)
+		}
+		defer root.Close()
+		return fn(root)
+	})
+}
+
+func (s *Store) withFileLock(lockPath string, fn func() error) error {
 	file, err := s.lockFile(lockPath)
-	// A concurrent CLI edit should not cost a completed job its run record.
+	// Brief concurrent CLI edits should finish before the next writer gives up.
 	for deadline := time.Now().Add(5 * time.Second); errors.Is(err, errDirectoryBusy) && time.Now().Before(deadline); {
 		time.Sleep(10 * time.Millisecond)
 		file, err = s.lockFile(lockPath)
@@ -152,12 +203,7 @@ func (s *Store) WithScheduleFiles(fn func(*os.Root) error) error {
 		return err
 	}
 	defer releaseLock(file)
-	root, err := s.root.OpenRoot("schedule")
-	if err != nil {
-		return fmt.Errorf("open schedule directory: %w", err)
-	}
-	defer root.Close()
-	return fn(root)
+	return fn()
 }
 
 func WithUser(ctx context.Context, user string) context.Context {
@@ -247,6 +293,26 @@ func (s *Store) setLink(channel, sender, user string) error {
 	return s.writeJSON("identities.json", links)
 }
 
+// LinkedUsers includes the configured owner even before the first pairing.
+func (s *Store) LinkedUsers(owner string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	links, err := s.links()
+	if err != nil {
+		return nil, err
+	}
+	users := []string{owner}
+	for key, user := range links {
+		channel, sender, ok := strings.Cut(key, "\x00")
+		if !ok || !ValidIdentity(channel) || !ValidIdentity(sender) || !ValidIdentity(user) {
+			return nil, fmt.Errorf("invalid linked identity")
+		}
+		users = append(users, user)
+	}
+	slices.Sort(users)
+	return slices.Compact(users), nil
+}
+
 func (s *Store) Resolve(channel, sender string) (string, bool) {
 	if !ValidIdentity(channel) || !ValidIdentity(sender) {
 		return "", false
@@ -291,6 +357,42 @@ func (s *Store) get(id string) (Session, error) {
 		return Session{}, fmt.Errorf("invalid session metadata for %q", id)
 	}
 	return session, nil
+}
+
+// Origins record first visits; a committed turn can return to an earlier origin.
+func (s *Store) LatestOrigin(user, id string) (Origin, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.get(id)
+	if err != nil {
+		return Origin{}, err
+	}
+	if session.User != user {
+		return Origin{}, fmt.Errorf("session does not belong to the user")
+	}
+	if session.ScheduledJob != "" || len(session.Origins) == 0 {
+		return Origin{}, nil
+	}
+	latest := session.Origins[len(session.Origins)-1]
+	if len(session.Origins) == 1 {
+		return latest, nil
+	}
+	channel, chat, sender := latest.Channel, latest.Chat, latest.Sender
+	err = s.visit(session, func(_ int, r record) bool {
+		if !r.Time.Before(latest.FirstSeen) {
+			channel, chat, sender = r.Channel, r.Chat, r.Sender
+		}
+		return true
+	})
+	if err != nil {
+		return Origin{}, err
+	}
+	for _, origin := range session.Origins {
+		if origin.Channel == channel && origin.Chat == chat && origin.Sender == sender {
+			return origin, nil
+		}
+	}
+	return Origin{}, fmt.Errorf("message origin missing from session %q", id)
 }
 
 func (s *Store) Get(id string) (Session, error) {
@@ -343,16 +445,20 @@ func validOrigin(channel, chat, sender string) bool {
 }
 
 func (s *Store) Open(user, channel, chat, sender string, idle time.Duration) (Session, error) {
-	return s.open(user, channel, chat, sender, idle, "")
+	return s.OpenAt(user, Origin{Channel: channel, Chat: chat, Sender: sender}, idle)
+}
+
+func (s *Store) OpenAt(user string, origin Origin, idle time.Duration) (Session, error) {
+	return s.open(user, origin, idle, "")
 }
 
 // OpenScheduled keeps a job's history separate even when the owner chats between runs.
 func (s *Store) OpenScheduled(user, job string) (Session, error) {
-	return s.open(user, "schedule", job, user, 0, job)
+	return s.open(user, Origin{Channel: "schedule", Chat: job, Sender: user}, 0, job)
 }
 
-func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job string) (Session, error) {
-	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
+func (s *Store) open(user string, origin Origin, idle time.Duration, job string) (Session, error) {
+	if !ValidIdentity(user) || !validOrigin(origin.Channel, origin.Chat, origin.Sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
 	s.mu.Lock()
@@ -368,7 +474,7 @@ func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job
 		idle = DefaultIdle
 	}
 	now := time.Now().UTC()
-	origin := Origin{channel, chat, sender, now}
+	origin.FirstSeen = now
 	list = slices.DeleteFunc(list, func(item Session) bool { return item.ScheduledJob != job })
 	if len(list) == 0 {
 		return s.createSession(user, origin, InboundRef{}, job)
@@ -380,16 +486,25 @@ func (s *Store) open(user, channel, chat, sender string, idle time.Duration, job
 	if job == "" && now.Sub(session.Updated) > idle {
 		return s.create(user, origin, InboundRef{})
 	}
-	for _, o := range session.Origins {
-		if o.Channel == channel && o.Chat == chat && o.Sender == sender {
-			return session, nil
-		}
+	if !session.recordOrigin(origin) {
+		return session, nil
 	}
-	session.Origins = append(session.Origins, origin)
 	if now.After(session.Updated) {
 		session.Updated = now
 	}
 	return session, s.writeJSON(sessionPath(session.ID, "meta.json"), session)
+}
+
+// Keep the first visit time and the most recently observed privacy for this chat.
+func (s *Session) recordOrigin(origin Origin) bool {
+	for i, old := range s.Origins {
+		if old.Channel == origin.Channel && old.Chat == origin.Chat && old.Sender == origin.Sender {
+			s.Origins[i].Private = origin.Private
+			return old.Private != origin.Private
+		}
+	}
+	s.Origins = append(s.Origins, origin)
+	return true
 }
 
 func (s *Store) NewSession(user, channel, chat, sender string) (Session, error) {
@@ -397,14 +512,18 @@ func (s *Store) NewSession(user, channel, chat, sender string) (Session, error) 
 }
 
 func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID string) (Session, error) {
-	if !ValidIdentity(user) || !validOrigin(channel, chat, sender) {
+	return s.NewSessionAt(user, Origin{Channel: channel, Chat: chat, Sender: sender}, inboundID)
+}
+
+func (s *Store) NewSessionAt(user string, origin Origin, inboundID string) (Session, error) {
+	if !ValidIdentity(user) || !validOrigin(origin.Channel, origin.Chat, origin.Sender) {
 		return Session{}, fmt.Errorf("invalid session user or origin")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var ref InboundRef
 	if inboundID != "" {
-		ref = InboundRef{channel, inboundID}
+		ref = InboundRef{origin.Channel, inboundID}
 		list, err := s.list(user, 0)
 		if err != nil {
 			return Session{}, err
@@ -415,7 +534,8 @@ func (s *Store) NewSessionForInbound(user, channel, chat, sender, inboundID stri
 			}
 		}
 	}
-	return s.create(user, Origin{channel, chat, sender, time.Now().UTC()}, ref)
+	origin.FirstSeen = time.Now().UTC()
+	return s.create(user, origin, ref)
 }
 
 func (s *Store) create(user string, o Origin, ref InboundRef) (Session, error) {
@@ -495,6 +615,11 @@ func (s *Store) Append(id, channel, chat, sender string, msgs ...provider.Messag
 }
 
 func (s *Store) AppendInbound(id, channel, chat, sender, inboundID string, msgs ...provider.Message) error {
+	return s.AppendAt(id, Origin{Channel: channel, Chat: chat, Sender: sender}, inboundID, msgs...)
+}
+
+func (s *Store) AppendAt(id string, origin Origin, inboundID string, msgs ...provider.Message) error {
+	channel, chat, sender := origin.Channel, origin.Chat, origin.Sender
 	if !validOrigin(channel, chat, sender) {
 		return fmt.Errorf("invalid message origin")
 	}
@@ -550,9 +675,8 @@ func (s *Store) AppendInbound(id, channel, chat, sender, inboundID string, msgs 
 	if err == nil {
 		updated := session
 		updated.Updated = now
-		if !slices.ContainsFunc(session.Origins, func(o Origin) bool { return o.Channel == channel && o.Chat == chat && o.Sender == sender }) {
-			updated.Origins = append(session.Origins, Origin{channel, chat, sender, now})
-		}
+		origin.FirstSeen = now
+		updated.recordOrigin(origin)
 		err = s.writeJSON(sessionPath(id, "meta.json"), updated)
 	}
 	if err != nil {
@@ -649,6 +773,29 @@ func (s *Store) FirstUserLine(id string) (string, error) {
 		return !ok
 	})
 	return line, err
+}
+
+// VisitMessages preserves committed log indices and checks ownership before disclosing content.
+func (s *Store) VisitMessages(user, id string, visit func(int, provider.Message, bool)) (Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session, err := s.get(id)
+	if err != nil {
+		return Session{}, err
+	}
+	if session.User != user {
+		return Session{}, fmt.Errorf("session does not belong to the user")
+	}
+	links, err := s.links()
+	if err != nil {
+		return Session{}, err
+	}
+	err = s.visit(session, func(i int, r record) bool {
+		linked := ValidIdentity(r.Channel) && ValidIdentity(r.Sender) && links[r.Channel+"\x00"+r.Sender] == user
+		visit(i, r.Message, linked)
+		return true
+	})
+	return session, err
 }
 
 func (s *Store) History(id string, maxMessages int) ([]provider.Message, error) {

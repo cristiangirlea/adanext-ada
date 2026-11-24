@@ -35,6 +35,7 @@ type Host struct {
 
 func (s *Service) Serve(ctx context.Context, data string, settings []Settings) error {
 	s.users = map[string]*queue{}
+	s.hosts = make(map[string]*Host)
 	var failures []error
 	var hosts []*Host
 	report := func(name string, err error) {
@@ -53,6 +54,7 @@ func (s *Service) Serve(ctx context.Context, data string, settings []Settings) e
 		defer h.ledger.close()
 		h.ctx, h.fail = context.WithCancelCause(ctx)
 		hosts = append(hosts, h)
+		s.hosts[h.Name] = h
 	}
 	if len(hosts) == 0 && len(failures) == 0 && s.Scheduler == nil {
 		return fmt.Errorf("no enabled channels")
@@ -71,10 +73,19 @@ func (s *Service) Serve(ctx context.Context, data string, settings []Settings) e
 		}()
 		defer func() { stop(); <-finished }()
 	}
+	if s.ProposeEvery > 0 {
+		run, stop := context.WithCancel(ctx)
+		finished := make(chan struct{})
+		go func() { defer close(finished); s.runLearning(run) }()
+		defer func() { stop(); <-finished }()
+	}
 	queueRecovered(hosts)
 	for _, h := range hosts {
 		go func() {
 			err := h.run(h.ctx)
+			s.mu.Lock()
+			delete(s.hosts, h.Name)
+			s.mu.Unlock()
 			if cause := context.Cause(h.ctx); cause != nil {
 				err = cause
 			}
@@ -406,6 +417,19 @@ func (h *Host) connected(ctx context.Context, c *process, timeout time.Duration)
 		if len(queue) > 0 {
 			send = output
 			head = queue[0]
+			if d, ok := head.(pending); ok {
+				allowed, err := h.prepareDelivery(d)
+				if err != nil {
+					return false, err
+				}
+				if !allowed {
+					delete(inFlight, d.ID)
+					queue[0] = nil
+					queue = queue[1:]
+					continue
+				}
+				head = d.Deliver
+			}
 		}
 		select {
 		case <-ctx.Done():

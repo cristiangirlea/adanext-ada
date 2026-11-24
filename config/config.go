@@ -13,21 +13,17 @@ import (
 	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/channel"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
+	"github.com/cristiangirlea/adanext-ada/learn"
 	"github.com/cristiangirlea/adanext-ada/loop"
 	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
 
-type KnowledgeSettings struct {
-	TenantID  string `json:"tenant_id"`
-	ProjectID string `json:"project_id"`
-	Backend   string `json:"backend"`
-	Model     string `json:"model"`
-	Revision  string `json:"revision"`
-}
+type KnowledgeSettings = hrnexec.KnowledgeScope
 
 type Settings struct {
+	Learning        LearningSettings   `json:"-"`
 	Channels        []channel.Settings `json:"channels"`
 	ApprovalTimeout time.Duration      `json:"-"`
 	DataDir         string             `json:"data_dir"`
@@ -45,7 +41,17 @@ type Settings struct {
 	MCPServers      []tool.MCPConfig   `json:"mcp_servers"`
 }
 
+type LearningSettings struct {
+	Skills           bool
+	KnowledgeBackend *string
+	ProposeEvery     time.Duration
+	OfferTTL         time.Duration
+	StaleAfter       time.Duration
+	ArchiveAfter     time.Duration
+}
+
 type HRNSettings struct {
+	Skills  bool
 	Home    string
 	Path    string
 	Mode    string
@@ -54,6 +60,14 @@ type HRNSettings struct {
 }
 
 type fileSettings struct {
+	Learning struct {
+		Skills           bool            `json:"skills"`
+		KnowledgeBackend json.RawMessage `json:"knowledge_backend"`
+		ProposeEvery     json.RawMessage `json:"propose_every"`
+		OfferTTL         string          `json:"offer_ttl"`
+		StaleAfter       string          `json:"stale_after"`
+		ArchiveAfter     string          `json:"archive_after"`
+	} `json:"learning"`
 	Approvals struct {
 		Timeout string `json:"timeout"`
 	} `json:"approvals"`
@@ -65,6 +79,7 @@ type fileSettings struct {
 		Timeout       string `json:"timeout"`
 	} `json:"budget"`
 	HRN struct {
+		Skills  bool   `json:"skills"`
 		Home    string `json:"home"`
 		Path    string `json:"path"`
 		Mode    string `json:"mode"`
@@ -104,6 +119,42 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s := data.Settings
+	s.Learning.Skills = data.Learning.Skills
+	// Only an omitted backend inherits the delegate setting.
+	if raw := data.Learning.KnowledgeBackend; raw != nil {
+		var backend string
+		if err := json.Unmarshal(raw, &backend); err != nil {
+			return Settings{}, fmt.Errorf("parse learning.knowledge_backend: %w", err)
+		}
+		s.Learning.KnowledgeBackend = &backend
+	}
+	every := "1h"
+	if string(data.Learning.ProposeEvery) == "0" {
+		every = "0"
+	} else if data.Learning.ProposeEvery != nil {
+		if err := json.Unmarshal(data.Learning.ProposeEvery, &every); err != nil {
+			return Settings{}, fmt.Errorf("parse learning.propose_every: %w", err)
+		}
+		if every == "" {
+			every = "1h"
+		}
+	}
+	s.Learning.ProposeEvery, err = parseTimeout("learning.propose_every", every)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.Learning.OfferTTL, err = parseTimeout("learning.offer_ttl", data.Learning.OfferTTL)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.Learning.StaleAfter, err = parseTimeout("learning.stale_after", data.Learning.StaleAfter)
+	if err != nil {
+		return Settings{}, err
+	}
+	s.Learning.ArchiveAfter, err = parseTimeout("learning.archive_after", data.Learning.ArchiveAfter)
+	if err != nil {
+		return Settings{}, err
+	}
 	s.ApprovalTimeout, err = parseTimeout("approvals.timeout", data.Approvals.Timeout)
 	if err != nil {
 		return Settings{}, err
@@ -113,7 +164,7 @@ func Load(path string) (Settings, error) {
 		return Settings{}, err
 	}
 	s.Budget = loop.Budget{MaxIterations: data.Budget.MaxIterations, MaxTokens: data.Budget.MaxTokens, Timeout: turnTimeout}
-	s.HRN = HRNSettings{Home: data.HRN.Home, Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
+	s.HRN = HRNSettings{Skills: data.HRN.Skills, Home: data.HRN.Home, Path: data.HRN.Path, Mode: data.HRN.Mode, Timeout: hrnTimeout, Backend: data.HRN.Backend}
 	if err := s.validate(); err != nil {
 		return Settings{}, err
 	}
@@ -154,6 +205,9 @@ func (s Settings) validate() error {
 	if s.ChatProvider == "" {
 		return fmt.Errorf("chat_provider is required")
 	}
+	if s.HRN.Skills && s.HRN.Backend != "claude" {
+		return fmt.Errorf("hrn.skills requires hrn.backend claude")
+	}
 	if s.HRN.Mode != "" && s.HRN.Mode != "readonly" && s.HRN.Mode != "auto" {
 		return fmt.Errorf("hrn.mode must be readonly or auto")
 	}
@@ -192,6 +246,15 @@ func (s Settings) validate() error {
 }
 
 func (s *Settings) setDefaults() error {
+	if s.Learning.OfferTTL == 0 {
+		s.Learning.OfferTTL = 168 * time.Hour
+	}
+	if s.Learning.StaleAfter == 0 {
+		s.Learning.StaleAfter = 2160 * time.Hour
+	}
+	if s.Learning.ArchiveAfter == 0 {
+		s.Learning.ArchiveAfter = 720 * time.Hour
+	}
 	if s.ApprovalTimeout == 0 {
 		s.ApprovalTimeout = approval.DefaultTimeout
 	}
@@ -242,6 +305,28 @@ func (s Settings) ProviderKeyEnv() []string {
 	return names
 }
 
+func (s Settings) hrnOptions() hrnexec.Options {
+	return hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
+}
+
+func (s Settings) SkillReview() learn.SkillReview {
+	return learn.SkillReview{Options: s.hrnOptions(), Timeout: s.HRN.Timeout}
+}
+
+func (s Settings) KnowledgeReview() learn.KnowledgeReview {
+	backend := s.HRN.Backend
+	if s.Learning.KnowledgeBackend != nil {
+		backend = *s.Learning.KnowledgeBackend
+	}
+	opts := s.hrnOptions()
+	opts.WithoutEnv = append(opts.WithoutEnv, "HRN_OPERATOR_TOKEN")
+	k := learn.KnowledgeReview{Options: opts, Backend: backend, Timeout: s.HRN.Timeout}
+	if s.Knowledge != nil {
+		k.Scope = *s.Knowledge
+	}
+	return k
+}
+
 type App struct {
 	*loop.Loop
 	Store *memory.Store
@@ -251,6 +336,17 @@ func Build(s Settings, getenv func(string) string) (*App, error) {
 	return build(s, getenv, 30*time.Second)
 }
 
+// BuildProvider applies chat's endpoint policy without starting any tools.
+func (s Settings) BuildProvider(getenv func(string) string) (provider.Provider, string, error) {
+	for _, cfg := range s.Providers {
+		if cfg.Name == s.ChatProvider {
+			model, err := provider.New(cfg, s.AllowMetered, getenv)
+			return model, cfg.Model, err
+		}
+	}
+	return nil, "", fmt.Errorf("chat_provider %q is not configured", s.ChatProvider)
+}
+
 func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Duration) (*App, error) {
 	if err := s.validate(); err != nil {
 		return nil, err
@@ -258,18 +354,7 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 	if err := s.setDefaults(); err != nil {
 		return nil, err
 	}
-	var selected *provider.Config
-	for _, cfg := range s.Providers {
-		if cfg.Name != s.ChatProvider {
-			continue
-		}
-		selected = &cfg
-		break
-	}
-	if selected == nil {
-		return nil, fmt.Errorf("chat_provider %q is not configured", s.ChatProvider)
-	}
-	model, err := provider.New(*selected, s.AllowMetered, getenv)
+	model, modelName, err := s.BuildProvider(getenv)
 	if err != nil {
 		return nil, err
 	}
@@ -283,18 +368,10 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 			return nil, err
 		}
 	}
-	opts := hrnexec.Options{HRNPath: s.HRN.Path, HRNHome: s.HRN.Home, WithoutEnv: s.ProviderKeyEnv()}
+	opts := s.hrnOptions()
 	if k := s.Knowledge; k != nil {
 		req := hrnexec.KnowledgeRequest{TenantID: k.TenantID, ProjectID: k.ProjectID, Backend: k.Backend, Model: k.Model, Revision: k.Revision}
 		if err := registry.Add(tool.SearchKnowledge{Options: opts, Request: req}); err != nil {
-			return nil, err
-		}
-	}
-	if len(s.WorkspaceRoots) > 0 {
-		if err := registry.Add(tool.Delegate{
-			Roots: s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
-			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
-		}); err != nil {
 			return nil, err
 		}
 	}
@@ -312,6 +389,17 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 		registry.Close()
 		return nil, err
 	}
+	if len(s.WorkspaceRoots) > 0 {
+		if err := registry.Add(tool.Delegate{
+			RecordDelegation: (learn.Store{Memory: store}).RecordDelegation,
+			Skills:           s.HRN.Skills, Roots: s.WorkspaceRoots, Options: opts, Mode: s.HRN.Mode,
+			Timeout: s.HRN.Timeout, Backend: s.HRN.Backend,
+		}); err != nil {
+			store.Close()
+			registry.Close()
+			return nil, err
+		}
+	}
 	if err := registry.Add(tool.SearchMemory{Store: store, HRNRuns: s.RunsDir(getenv)}); err != nil {
 		store.Close()
 		registry.Close()
@@ -324,5 +412,5 @@ func build(s Settings, getenv func(string) string, mcpStartupTimeout time.Durati
 		}
 		return store.Render(user)
 	}
-	return &App{Loop: &loop.Loop{Provider: model, Tools: registry, Model: selected.Model, Budget: s.Budget, Context: profile}, Store: store}, nil
+	return &App{Loop: &loop.Loop{Provider: model, Tools: registry, Model: modelName, Budget: s.Budget, Context: profile}, Store: store}, nil
 }

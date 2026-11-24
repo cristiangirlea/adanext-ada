@@ -6,10 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/cristiangirlea/adanext-ada/internal/terminal"
 )
 
 type KnowledgeRequest struct {
@@ -34,6 +38,8 @@ type KnowledgePacket struct {
 	EmptyReason string           `json:"empty_reason"`
 	Entries     []KnowledgeEntry `json:"entries"`
 }
+
+var errOutputLimit = errors.New("output exceeds")
 
 type boundedOutput struct {
 	buf      bytes.Buffer
@@ -76,59 +82,15 @@ func (b *boundedOutput) diagnostic(env []string) string {
 
 func SearchKnowledge(ctx context.Context, opts Options, req KnowledgeRequest) (KnowledgePacket, error) {
 	var packet KnowledgePacket
-	if err := ctx.Err(); err != nil {
-		return packet, err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	f, err := os.CreateTemp("", "ada-knowledge-*.json")
-	if err != nil {
-		return packet, fmt.Errorf("create knowledge request: %w", err)
-	}
-	defer os.Remove(f.Name())
-	if err := errors.Join(json.NewEncoder(f).Encode(req), f.Close()); err != nil {
-		return packet, fmt.Errorf("write knowledge request: %w", err)
-	}
-	cmd, err := hrnCommand(opts, "knowledge", "search", f.Name())
+	data, err := runKnowledge(ctx, opts, 30*time.Second, req, func(path string) []string { return []string{"search", path} })
 	if err != nil {
 		return packet, err
-	}
-	stdout := boundedOutput{limit: 1 << 20}
-	stderr := boundedOutput{limit: 512}
-	// Redact the values actually inherited by this child even if the parent environment changes.
-	cmd.Env = cmd.Environ()
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return packet, fmt.Errorf("start hrn knowledge: %w", err)
-	}
-	kill, closeTree, err := manageProcessTree(cmd)
-	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return packet, err
-	}
-	defer closeTree()
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case <-ctx.Done():
-		kill()
-		<-done
-		return packet, fmt.Errorf("hrn knowledge: %w", ctx.Err())
-	case err := <-done:
-		if err != nil {
-			return packet, fmt.Errorf("hrn knowledge: %w: %s", err, stderr.diagnostic(cmd.Env))
-		}
-	}
-	if stdout.overflow {
-		return packet, fmt.Errorf("hrn knowledge output exceeds 1 MiB")
 	}
 	var response struct {
 		*KnowledgePacket
 		Packet json.RawMessage `json:"packet"`
 	}
-	if err := json.Unmarshal(stdout.buf.Bytes(), &response); err != nil {
+	if err := json.Unmarshal(data, &response); err != nil {
 		return packet, fmt.Errorf("decode knowledge response: %w", err)
 	}
 	if response.Packet != nil {
@@ -142,4 +104,143 @@ func SearchKnowledge(ctx context.Context, opts Options, req KnowledgeRequest) (K
 		return packet, fmt.Errorf("missing knowledge packet fields")
 	}
 	return *response.KnowledgePacket, nil
+}
+
+func runKnowledge(ctx context.Context, opts Options, timeout time.Duration, req any, args func(string) []string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	f, err := os.CreateTemp("", "ada-knowledge-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("create knowledge request: %w", err)
+	}
+	defer os.Remove(f.Name())
+	if err := errors.Join(json.NewEncoder(f).Encode(req), f.Close()); err != nil {
+		return nil, fmt.Errorf("write knowledge request: %w", err)
+	}
+	return runReport(ctx, opts, "", 1<<20, nil, append([]string{"knowledge"}, args(f.Name())...)...)
+}
+
+func runReport(ctx context.Context, opts Options, dir string, limit int, progress io.Writer, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cmd, err := hrnCommand(opts, args...)
+	if err != nil {
+		return nil, err
+	}
+	cmd.Dir = dir
+	stdout := boundedOutput{limit: limit}
+	stderr := boundedOutput{limit: 512}
+	// Redact the values actually inherited by this child even if the parent environment changes.
+	cmd.Env = cmd.Environ()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	var live *progressWriter
+	if progress != nil {
+		live = newProgressWriter(progress, cmd.Env)
+		cmd.Stderr = io.MultiWriter(live, &stderr)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start hrn %s: %w", args[0], err)
+	}
+	kill, closeTree, err := manageProcessTree(cmd)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
+	}
+	defer closeTree()
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	var waitErr error
+	select {
+	case <-ctx.Done():
+		kill()
+		<-done
+		if live != nil {
+			_ = live.flush()
+		}
+		return nil, fmt.Errorf("hrn %s: %w", args[0], ctx.Err())
+	case waitErr = <-done:
+	}
+	if live != nil {
+		waitErr = errors.Join(waitErr, live.flush())
+	}
+	if waitErr != nil {
+		waitErr = fmt.Errorf("hrn %s: %w: %s", args[0], waitErr, terminal.Field(stderr.diagnostic(cmd.Env)))
+	}
+	if stdout.overflow {
+		return nil, fmt.Errorf("hrn %s %w %d MiB", args[0], errOutputLimit, limit>>20)
+	}
+	return stdout.buf.Bytes(), waitErr
+}
+
+type KnowledgeScope struct {
+	TenantID  string `json:"tenant_id"`
+	ProjectID string `json:"project_id"`
+	Backend   string `json:"backend"`
+	Model     string `json:"model"`
+	Revision  string `json:"revision"`
+}
+
+type KnowledgeDraft struct {
+	KnowledgeScope
+	Origin         string           `json:"origin"`
+	ReviewedBy     string           `json:"reviewed_by"`
+	ReviewEvidence string           `json:"review_evidence"`
+	Entries        []KnowledgeEntry `json:"entries"`
+}
+
+func ProposeKnowledge(ctx context.Context, opts Options, timeout time.Duration, scope KnowledgeScope, backend string, runs []string, output string) (KnowledgeProposal, error) {
+	if backend != "claude" && backend != "codex" {
+		return KnowledgeProposal{}, fmt.Errorf("knowledge propose requires claude or codex")
+	}
+	base := KnowledgeDraft{KnowledgeScope: scope, Entries: []KnowledgeEntry{}}
+	data, err := runKnowledge(ctx, opts, timeout, base, func(path string) []string {
+		args := []string{"propose", "-request", path, "-b", backend}
+		for _, id := range runs {
+			args = append(args, "-run", id)
+		}
+		return append(args, "-json", "-o", output)
+	})
+	partial := false
+	if err != nil {
+		exit, ok := errors.AsType[*exec.ExitError](err)
+		if !ok || exit.ExitCode() != 3 {
+			return KnowledgeProposal{}, err
+		}
+		partial = true
+	}
+	return parseKnowledgeProposal(data, runs, output, partial)
+}
+
+type KnowledgeVersion struct {
+	KnowledgeScope
+	ID        string `json:"id"`
+	Admission struct {
+		Verdict string `json:"verdict"`
+	} `json:"admission"`
+	Entries []KnowledgeEntry `json:"entries"`
+}
+
+func InspectKnowledge(ctx context.Context, opts Options, timeout time.Duration, scope KnowledgeScope, version string) (KnowledgeVersion, error) {
+	req := struct {
+		KnowledgeScope
+		Version string `json:"version_id"`
+	}{scope, version}
+	var result KnowledgeVersion
+	data, err := runKnowledge(ctx, opts, timeout, req, func(path string) []string { return []string{"inspect", path} })
+	if err != nil {
+		return result, err
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return result, fmt.Errorf("decode knowledge version: %w", err)
+	}
+	if result.ID != version || result.KnowledgeScope != scope {
+		return result, fmt.Errorf("inspected version does not match the requested version and scope")
+	}
+	return result, nil
 }

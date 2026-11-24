@@ -3,7 +3,9 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -559,5 +561,43 @@ func TestProfileWriterLock(t *testing.T) {
 	}
 	if facts := second.Facts("owner"); len(facts) != 1 {
 		t.Fatal(facts)
+	}
+}
+
+func TestOriginPrivacyFollowsTheLatestObservation(t *testing.T) {
+	s, _ := testStore(t)
+	private := Origin{Channel: "echo", Chat: "c1", Sender: "alice", Private: true}
+	session, err := s.OpenAt("u", private, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.Get(session.ID)
+	if err != nil || len(first.Origins) != 1 || !first.Origins[0].Private {
+		t.Fatal(first, err)
+	}
+	group := private
+	group.Private = false
+	if err := s.AppendAt(session.ID, group, "", message("user", "text", "now in a group")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Get(session.ID)
+	if err != nil || len(got.Origins) != 1 || got.Origins[0].Private || !got.Origins[0].FirstSeen.Equal(first.Origins[0].FirstSeen) {
+		t.Fatal("a chat seen as a group must stop counting as private", got, err)
+	}
+	if latest, err := s.LatestOrigin("u", session.ID); err != nil || latest.Private {
+		t.Fatal("latest origin still private", latest, err)
+	}
+	if err := s.AppendAt(session.ID, private, "", message("user", "text", "private again")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = s.Get(session.ID); err != nil || len(got.Origins) != 1 || !got.Origins[0].Private {
+		t.Fatal(got, err)
+	}
+}
+
+func TestLockFileInAMissingDirectoryStillFails(t *testing.T) {
+	s, _ := testStore(t)
+	if _, err := s.lockFile(filepath.Join("absent", "x.lock")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("got %v, want a missing-file error", err)
 	}
 }

@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
+	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 )
 
@@ -19,11 +22,13 @@ const DefaultDelegateTimeout = 30 * time.Minute
 var delegatePurposes = []string{"review", "debug", "implement", "refactor", "test", "research", "plan", "ops"}
 
 type Delegate struct {
-	Roots   []string
-	Options hrnexec.Options
-	Mode    string
-	Timeout time.Duration
-	Backend string
+	Skills           bool
+	RecordDelegation func(runID, user, session string) error
+	Roots            []string
+	Options          hrnexec.Options
+	Mode             string
+	Timeout          time.Duration
+	Backend          string
 }
 
 func (Delegate) Spec() provider.ToolSpec {
@@ -76,7 +81,7 @@ func (t Delegate) task(raw json.RawMessage) (hrnexec.Task, error) {
 			return hrnexec.Task{}, fmt.Errorf("invalid delegation purpose %q", purpose)
 		}
 	}
-	root, rel, err := withinRoots(input.Dir, t.Roots)
+	root, rel, err := WithinRoots(input.Dir, t.Roots)
 	if err != nil {
 		return hrnexec.Task{}, fmt.Errorf("delegate workspace: %w", err)
 	}
@@ -91,15 +96,24 @@ func (t Delegate) task(raw json.RawMessage) (hrnexec.Task, error) {
 	if t.Timeout <= 0 {
 		t.Timeout = DefaultDelegateTimeout
 	}
+	var skills *bool
+	if t.Skills {
+		skills = &t.Skills
+	}
 	return hrnexec.Task{
+		Skills: skills,
 		Prompt: input.Prompt, Dir: dir, Backend: t.Backend, Mode: t.Mode,
 		Timeout: t.Timeout.String(), Purpose: purpose,
 	}, nil
 }
 
 func delegateSummary(task hrnexec.Task) string {
-	return fmt.Sprintf("hrn exec backend=%q mode=%q dir=%q timeout=%s purpose=%q prompt=%q",
-		task.Backend, task.Mode, task.Dir, task.Timeout, task.Purpose, task.Prompt)
+	var skills string
+	if task.Skills != nil {
+		skills = fmt.Sprintf(" skills=%t", *task.Skills)
+	}
+	return fmt.Sprintf("hrn exec backend=%q mode=%q dir=%q timeout=%s purpose=%q%s prompt=%q",
+		task.Backend, task.Mode, task.Dir, task.Timeout, task.Purpose, skills, task.Prompt)
 }
 
 func (t Delegate) Summary(raw json.RawMessage) (string, error) {
@@ -126,5 +140,13 @@ func (t Delegate) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	if result.Status != "ok" {
 		return "", fmt.Errorf("hrn run %s ended with status %s: %s", result.RunID, result.Status, result.Final)
 	}
-	return fmt.Sprintf("Status: %s\nRun ID: %s\nBackend: %s\n\n%s", result.Status, result.RunID, result.Backend, result.Final), nil
+	text := fmt.Sprintf("Status: %s\nRun ID: %s\nBackend: %s\n\n%s", result.Status, result.RunID, result.Backend, result.Final)
+	if t.RecordDelegation != nil {
+		user, _ := memory.UserFrom(ctx)
+		if err := t.RecordDelegation(result.RunID, user, approval.SessionFrom(ctx)); err != nil {
+			log.Printf("hrn run %s was not recorded for knowledge review: %v", result.RunID, err)
+			text += "\nThis run was not recorded for knowledge review."
+		}
+	}
+	return text, nil
 }
