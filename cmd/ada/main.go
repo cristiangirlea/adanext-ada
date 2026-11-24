@@ -178,7 +178,8 @@ func newServeService(settings config.Settings, conversation *config.App, diagnos
 		Idle: settings.SessionIdle, History: settings.HistoryMessages,
 		WithoutEnv:   settings.ProviderKeyEnv(),
 		ProposeEvery: settings.Learning.ProposeEvery, OfferTTL: settings.Learning.OfferTTL,
-		Decision: (learn.Store{Memory: conversation.Store}).DecideOffer,
+		Knowledge: settings.KnowledgeReview(),
+		Decision:  (learn.Store{Memory: conversation.Store}).DecideOffer,
 		Status: func(line string) {
 			statusMu.Lock()
 			defer statusMu.Unlock()
@@ -226,7 +227,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, diagnostics io.W
 		return scheduleCommand(ctx, flags.Args(), *path, out)
 	}
 	if args[0] == "learn" {
-		return learnCommand(ctx, flags.Args(), *path, out)
+		return learnCommand(ctx, flags.Args(), *path, out, diagnostics)
 	}
 	settings, err := config.Load(*path)
 	if err != nil {

@@ -21,6 +21,10 @@ type offerTarget struct {
 }
 
 func (s *Service) runLearning(ctx context.Context) {
+	review := s.Knowledge.WithDiagnostics(func(message string) { s.status("learning", message) })
+	if !review.Enabled() {
+		s.status("learning", learn.ErrKnowledgeDisabled.Error())
+	}
 	timer := time.NewTimer(s.ProposeEvery)
 	defer timer.Stop()
 	for {
@@ -28,7 +32,7 @@ func (s *Service) runLearning(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if err := s.proposeRecent(ctx); err != nil && ctx.Err() == nil {
+			if err := s.proposeRecent(ctx, review); err != nil && ctx.Err() == nil {
 				s.status("learning", err.Error())
 			}
 			timer.Reset(s.ProposeEvery)
@@ -36,7 +40,7 @@ func (s *Service) runLearning(ctx context.Context) {
 	}
 }
 
-func (s *Service) proposeRecent(ctx context.Context) error {
+func (s *Service) proposeRecent(ctx context.Context, review learn.KnowledgeReview) error {
 	users, err := s.Store.LinkedUsers(s.Owner)
 	if err != nil {
 		return err
@@ -62,10 +66,19 @@ func (s *Service) proposeRecent(ctx context.Context) error {
 			}
 		}
 	}
+	if review.Enabled() {
+		_, err := learn.ProposeKnowledge(ctx, store, s.Owner, review)
+		if err != nil {
+			failures = append(failures, err)
+		}
+	}
 	return errors.Join(failures...)
 }
 
 func (s *Service) offer(user string, item learn.Proposal) error {
+	if item.Kind != "fact" {
+		return nil
+	}
 	origin, err := s.Store.LatestOrigin(user, item.Session)
 	if err != nil {
 		return err

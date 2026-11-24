@@ -62,13 +62,18 @@ func WithSession(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, sessionKey{}, id)
 }
 
+func SessionFrom(ctx context.Context) string {
+	id, _ := ctx.Value(sessionKey{}).(string)
+	return id
+}
+
 func NewRequest(ctx context.Context, tool, effect, summary string, timeout time.Duration) Request {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
 	now := time.Now().UTC()
 	user, _ := memory.UserFrom(ctx)
-	session, _ := ctx.Value(sessionKey{}).(string)
+	session := SessionFrom(ctx)
 	return Request{
 		ID: rand.Text()[:12], User: user, Session: session, Tool: tool,
 		Effect: effect, Summary: summary, Created: now, Expires: now.Add(timeout),

@@ -1,4 +1,4 @@
-// Package learn keeps proposed profile facts separate from the user's approved profile.
+// Package learn records proposals and decisions for profile facts and project knowledge.
 package learn
 
 import (
@@ -16,6 +16,9 @@ import (
 type Store struct{ Memory *memory.Store }
 
 type Proposal struct {
+	Draft           string    `json:"draft,omitempty"`
+	SourceRuns      []string  `json:"source_runs,omitempty"`
+	Version         string    `json:"version,omitempty"`
 	Offer           *Offer    `json:"offer,omitempty"`
 	DecisionInbound string    `json:"decision_inbound,omitempty"`
 	ID              string    `json:"id"`
@@ -32,14 +35,28 @@ type Proposal struct {
 }
 
 type state struct {
-	Proposals []Proposal     `json:"proposals"`
-	Reviewed  map[string]int `json:"reviewed"`
+	Proposals        []Proposal        `json:"proposals"`
+	Reviewed         map[string]int    `json:"reviewed"`
+	RunFailures      map[string]int    `json:"review_failures,omitempty"`
+	ReviewedRuns     map[string]bool   `json:"reviewed_runs,omitempty"`
+	KnowledgeBackoff *knowledgeBackoff `json:"knowledge_backoff,omitempty"`
+}
+
+type knowledgeBackoff struct {
+	Failures int       `json:"failures"`
+	Next     time.Time `json:"next"`
+}
+
+const maxKnowledgeBackoff = 168 * time.Hour
+
+func (b *knowledgeBackoff) waiting(now time.Time) bool {
+	return b != nil && now.Before(b.Next) && !b.Next.After(now.Add(maxKnowledgeBackoff))
 }
 
 var randomID = regexp.MustCompile(`^[A-Z2-7]{26,}$`)
 
 func (p *Proposal) UnmarshalJSON(data []byte) error {
-	fields, err := objectWithOptional(data, []string{"offer", "decision_inbound"}, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
+	fields, err := objectWithOptional(data, []string{"offer", "decision_inbound", "draft", "source_runs", "version"}, "id", "kind", "text", "session", "messages", "outside", "status", "created", "decided", "fact_id", "confirmed")
 	if err != nil {
 		return err
 	}
@@ -57,6 +74,12 @@ func (p *Proposal) UnmarshalJSON(data []byte) error {
 }
 
 func (p Proposal) validate(reviewed map[string]int) error {
+	if p.Kind == "knowledge" {
+		return p.validateKnowledge()
+	}
+	if p.Draft != "" || len(p.SourceRuns) != 0 || p.Version != "" {
+		return fmt.Errorf("fact has knowledge fields")
+	}
 	count, exists := reviewed[p.Session]
 	if !exists || count == 0 || !randomID.MatchString(p.ID) || p.Kind != "fact" || p.Created.IsZero() || len(p.Messages) == 0 {
 		return fmt.Errorf("invalid proposal identity, kind, creation time or evidence")
@@ -101,20 +124,58 @@ func load(root *os.Root, name string) (state, error) {
 	var st state
 	data, err := root.ReadFile(name)
 	if errors.Is(err, os.ErrNotExist) {
-		return state{[]Proposal{}, map[string]int{}}, nil
+		return state{Proposals: []Proposal{}, Reviewed: map[string]int{}}, nil
 	}
 	if err != nil {
 		return st, err
 	}
-	fields, err := object(data, "proposals", "reviewed")
+	fields, err := objectWithOptional(data, []string{"reviewed_runs", "run_failures", "review_failures", "knowledge_backoff"}, "proposals", "reviewed")
 	if err != nil {
 		return st, err
 	}
 	if _, err := object(fields["reviewed"]); err != nil {
 		return st, err
 	}
+	for _, key := range []string{"reviewed_runs", "run_failures", "review_failures"} {
+		if raw, ok := fields[key]; ok {
+			if _, err := object(raw); err != nil {
+				return st, err
+			}
+		}
+	}
+	if raw, ok := fields["knowledge_backoff"]; ok {
+		if _, err := object(raw, "failures", "next"); err != nil {
+			return st, err
+		}
+	}
 	if err := json.Unmarshal(data, &st); err != nil {
 		return st, err
+	}
+	if b := st.KnowledgeBackoff; b != nil && (b.Failures < 1 || b.Next.IsZero()) {
+		return st, fmt.Errorf("invalid knowledge back-off")
+	}
+	for id, reviewed := range st.ReviewedRuns {
+		if !runID.MatchString(id) || !reviewed {
+			return st, fmt.Errorf("invalid reviewed run")
+		}
+	}
+	legacy := fields["run_failures"] != nil
+	if legacy {
+		if st.RunFailures != nil {
+			return st, fmt.Errorf("conflicting knowledge failure counts")
+		}
+		if err := json.Unmarshal(fields["run_failures"], &st.RunFailures); err != nil {
+			return st, err
+		}
+	}
+	for id, count := range st.RunFailures {
+		if !runID.MatchString(id) || st.ReviewedRuns[id] || count < 0 || count >= maxRunFailures {
+			return st, fmt.Errorf("invalid knowledge run failure count")
+		}
+		if legacy {
+			// Older counts also included batch errors. Preserve retry order only.
+			st.RunFailures[id] = 0
+		}
 	}
 	for session, n := range st.Reviewed {
 		if !memory.ValidSessionID(session) || n < 0 {
@@ -133,6 +194,11 @@ func load(root *os.Root, name string) (state, error) {
 				return st, fmt.Errorf("duplicate offer delivery ID")
 			}
 			deliveries[p.Offer.DeliveryID] = true
+		}
+		for _, run := range p.SourceRuns {
+			if !st.ReviewedRuns[run] {
+				return st, fmt.Errorf("proposal cites an unreviewed run")
+			}
 		}
 		if err := p.validate(st.Reviewed); err != nil {
 			return st, err
@@ -239,6 +305,23 @@ func (tx *transaction) change(p *Proposal, action string, now time.Time) error {
 		return fmt.Errorf("decision precedes proposal history")
 	}
 	now = now.UTC()
+	if p.Kind == "knowledge" {
+		switch action {
+		case "keep":
+			return fmt.Errorf("read and sign the draft, run hrn knowledge import and hrn knowledge admit, then ada learn keep %s -version VERSION_ID", p.ID)
+		case "reject":
+			op := intent{ID: p.ID, Action: action, At: now}
+			if err := memory.WriteJSON(tx.root, tx.journal(), op); err != nil {
+				return err
+			}
+			return tx.rejectDraft(p, op)
+		case "rollback":
+			p.Status, p.Decided = step.to, now
+			return tx.save()
+		default:
+			return fmt.Errorf("cannot %s project knowledge", action)
+		}
+	}
 	switch action {
 	case "keep", "restore", "rollback", "archive":
 		return tx.changeProfile(p, action, now)
@@ -257,6 +340,9 @@ func (s Store) Sweep(user string, now time.Time, staleAfter, archiveAfter time.D
 	err := s.withUser(user, func(tx *transaction) error {
 		for i := range tx.Proposals {
 			p := &tx.Proposals[i]
+			if p.Kind != "fact" {
+				continue
+			}
 			staleAt := p.Confirmed.Add(staleAfter)
 			if p.Status == "kept" && now.After(staleAt) {
 				if err := tx.change(p, "stale", staleAt); err != nil {

@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cristiangirlea/adanext-ada/approval"
+	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 	"github.com/cristiangirlea/adanext-ada/tool"
 )
@@ -101,7 +103,8 @@ func TestBuildFiltersEveryProviderKeyFromHRN(t *testing.T) {
 	}
 	t.Cleanup(func() { l.Tools.Close(); l.Store.Close() })
 	input, _ := json.Marshal(map[string]string{"prompt": "review", "dir": root})
-	if got, err := l.Tools.Run(t.Context(), "delegate_to_hrn", input); err != nil || !strings.Contains(got, "filtered") {
+	ctx := approval.WithSession(memory.WithUser(t.Context(), "owner"), "test-session")
+	if got, err := l.Tools.Run(ctx, "delegate_to_hrn", input); err != nil || !strings.Contains(got, "filtered") {
 		t.Fatalf("delegate = %q, %v", got, err)
 	}
 	if got, err := l.Tools.Run(t.Context(), "search_knowledge", []byte(`{"query":"test"}`)); err != nil || got != "empty" {
@@ -133,8 +136,8 @@ func TestMain(m *testing.M) {
 		if !scanner.Scan() || json.Unmarshal(scanner.Bytes(), &start) != nil || start.AttemptID == "" {
 			os.Exit(2)
 		}
-		fmt.Printf(`{"v":1,"seq":2,"type":"accepted","attempt_id":%q,"run_id":"env-check"}`+"\n", start.AttemptID)
-		fmt.Printf(`{"v":1,"seq":3,"type":"result","attempt_id":%q,"run_id":"env-check","result":{"status":"ok","final":"filtered"}}`+"\n", start.AttemptID)
+		fmt.Printf(`{"v":1,"seq":2,"type":"accepted","attempt_id":%q,"run_id":"20261123-120000-abcdef"}`+"\n", start.AttemptID)
+		fmt.Printf(`{"v":1,"seq":3,"type":"result","attempt_id":%q,"run_id":"20261123-120000-abcdef","result":{"status":"ok","final":"filtered"}}`+"\n", start.AttemptID)
 		os.Exit(0)
 	}
 	os.Exit(m.Run())

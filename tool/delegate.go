@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/cristiangirlea/adanext-ada/approval"
 	"github.com/cristiangirlea/adanext-ada/hrnexec"
+	"github.com/cristiangirlea/adanext-ada/memory"
 	"github.com/cristiangirlea/adanext-ada/provider"
 )
 
@@ -19,11 +22,12 @@ const DefaultDelegateTimeout = 30 * time.Minute
 var delegatePurposes = []string{"review", "debug", "implement", "refactor", "test", "research", "plan", "ops"}
 
 type Delegate struct {
-	Roots   []string
-	Options hrnexec.Options
-	Mode    string
-	Timeout time.Duration
-	Backend string
+	RecordDelegation func(runID, user, session string) error
+	Roots            []string
+	Options          hrnexec.Options
+	Mode             string
+	Timeout          time.Duration
+	Backend          string
 }
 
 func (Delegate) Spec() provider.ToolSpec {
@@ -126,5 +130,13 @@ func (t Delegate) Run(ctx context.Context, raw json.RawMessage) (string, error) 
 	if result.Status != "ok" {
 		return "", fmt.Errorf("hrn run %s ended with status %s: %s", result.RunID, result.Status, result.Final)
 	}
-	return fmt.Sprintf("Status: %s\nRun ID: %s\nBackend: %s\n\n%s", result.Status, result.RunID, result.Backend, result.Final), nil
+	text := fmt.Sprintf("Status: %s\nRun ID: %s\nBackend: %s\n\n%s", result.Status, result.RunID, result.Backend, result.Final)
+	if t.RecordDelegation != nil {
+		user, _ := memory.UserFrom(ctx)
+		if err := t.RecordDelegation(result.RunID, user, approval.SessionFrom(ctx)); err != nil {
+			log.Printf("hrn run %s was not recorded for knowledge review: %v", result.RunID, err)
+			text += "\nThis run was not recorded for knowledge review."
+		}
+	}
+	return text, nil
 }
