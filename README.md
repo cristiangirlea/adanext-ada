@@ -33,10 +33,11 @@ epic, [issue #1](https://github.com/cristiangirlea/adanext-ada/issues/1).
 You need Go as pinned in `go.mod` and a model endpoint. A local OpenAI-compatible server (for
 example llama.cpp's `llama-server`) needs no key and no billing.
 
-1. Install a release, or build from a clone:
+1. Install a release, or build from a clone. `go install` writes to `$(go env GOBIN)`, or
+   `$(go env GOPATH)/bin` when that is empty; that folder must be on your PATH.
 
    ```bash
-   go install github.com/cristiangirlea/adanext-ada/cmd/ada@latest   # into $(go env GOPATH)/bin
+   go install github.com/cristiangirlea/adanext-ada/cmd/ada@latest
    ada version
 
    go build ./cmd/ada            # in a clone: writes ada, or ada.exe on Windows
@@ -66,7 +67,7 @@ example llama.cpp's `llama-server`) needs no key and no billing.
    input quits:
 
    ```bash
-   ./ada chat            # -new starts a new session, -resume ID continues one
+   ada chat              # ./ada in a clone; -new starts a new session, -resume ID continues one
    ```
 
 `ada serve` runs the channel plugins, scheduled jobs and the learning-proposal sweep. Only one
