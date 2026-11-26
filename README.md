@@ -16,8 +16,8 @@ you already use, each task on its own branch with checks and a full record.
 
 ## Status
 
-Early and unreleased: build it from source. The plan is the epic,
-[issue #1](https://github.com/cristiangirlea/adanext-ada/issues/1).
+Early: the first release, v0.1.0, is source only, installed with `go install`. The plan is the
+epic, [issue #1](https://github.com/cristiangirlea/adanext-ada/issues/1).
 
 | Works today | Still to come |
 |---|---|
@@ -33,10 +33,14 @@ Early and unreleased: build it from source. The plan is the epic,
 You need Go as pinned in `go.mod` and a model endpoint. A local OpenAI-compatible server (for
 example llama.cpp's `llama-server`) needs no key and no billing.
 
-1. Build:
+1. Install a release, or build from a clone. `go install` writes to `$(go env GOBIN)`, or
+   `$(go env GOPATH)/bin` when that is empty; that folder must be on your PATH.
 
    ```bash
-   go build ./cmd/ada            # writes ada, or ada.exe on Windows
+   go install github.com/cristiangirlea/adanext-ada/cmd/ada@latest
+   ada version
+
+   go build ./cmd/ada            # in a clone: writes ada, or ada.exe on Windows
    ./ada version
    ```
 
@@ -63,7 +67,7 @@ example llama.cpp's `llama-server`) needs no key and no billing.
    input quits:
 
    ```bash
-   ./ada chat            # -new starts a new session, -resume ID continues one
+   ada chat              # ./ada in a clone; -new starts a new session, -resume ID continues one
    ```
 
 `ada serve` runs the channel plugins, scheduled jobs and the learning-proposal sweep. Only one
