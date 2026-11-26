@@ -5,16 +5,25 @@ channel plugins (pairing, allowlists, delivery), approvals, scheduled jobs and l
 proposals. Coding work is delegated to hrn (cristiangirlea/harness); chat apps are plugins from
 cristiangirlea/adanext-channels; commands go through cristiangirlea/adanext-exec.
 
-Issue #1 is the epic and lists the slices in order; take one slice per branch. `docs/` arrives
-with the first slice; until then the issues are the design.
+Issue #1 is the epic and lists the slices in order; take one slice per branch. `docs/` describes
+the behaviour that is built; the open slices' issues are the design for the rest.
 
 ## Layout
 
 | Path | Holds |
 |---|---|
-| `doc.go` | The package comment. Packages arrive with their slices. |
+| `doc.go` | The root package: its comment and `Version`. |
+| `cmd/ada/` | The `ada` command: chat, serve, schedule, channels, pair, unpair, profile, learn, sessions, approvals, search, version. |
+| `config/` | Settings loading; builds the provider, tools, memory store and loop. |
+| `loop/`, `provider/`, `tool/` | The conversation loop, the model adapters and the tools it can call. |
+| `memory/` | Sessions, profile facts, pairing links, local search and the data-directory locks. |
+| `approval/` | Approval requests and decisions. |
 | `channel/` | Channel plugin supervision, conversation delivery, approvals and journals. |
-| `internal/proctree/` | Platform-specific process tree management for plugins. |
+| `schedule/` | Scheduled jobs. |
+| `learn/` | Learning proposals and decisions: profile facts, project knowledge, coding skills. |
+| `hrnexec/` | Runs hrn: delegated tasks, knowledge and skill evaluations. |
+| `internal/` | Process trees for plugins, terminal output, strict JSON objects. |
+| `docs/` | One page per area; README links them. |
 | `.claude/hooks/` | gofmt, push and hidden-character checks; their tests run in CI. |
 | `.github/workflows/ci.yml` | CI on GitHub's hosted Ubuntu, Windows and macOS runners (public repository). |
 
